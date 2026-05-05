@@ -1,12 +1,14 @@
 package com.example.myapplication
 
-import android.content.Context
 import android.content.Intent
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
 import android.util.Log
 
 class AlertNotificationListener : NotificationListenerService() {
+
+    private var lastTriggerTime: Long = 0
+    private val debounceMs = 800L
 
     override fun onNotificationPosted(sbn: StatusBarNotification) {
         super.onNotificationPosted(sbn)
@@ -18,50 +20,36 @@ class AlertNotificationListener : NotificationListenerService() {
 
         if (packageName == applicationContext.packageName) return
 
-        val prefs = applicationContext.getSharedPreferences("rules", Context.MODE_PRIVATE)
-        val keywordEnabled = prefs.getBoolean("keywordEnabled", true)
-        val keyword = prefs.getString("keyword", "") ?: ""
-        val targetPackage = prefs.getString("packageName", null)
+        val rules = RuleStore.loadAll(applicationContext).filter { it.enabled }
+        if (rules.isEmpty()) return
 
-        val keywordActive = keywordEnabled && keyword.isNotBlank()
-        val packageActive = !targetPackage.isNullOrBlank()
-
-        Log.d("AlertListener", "▶ 알림 수신 [$packageName] title='$title' text='$text'")
-        Log.d("AlertListener", "  설정: keywordEnabled=$keywordEnabled keyword='$keyword' targetPackage='$targetPackage'")
-        Log.d("AlertListener", "  활성: keywordActive=$keywordActive packageActive=$packageActive")
-
-        val keywordMatch = keywordActive && (title.contains(keyword) || text.contains(keyword))
-        val packageMatch = packageActive && packageName == targetPackage
-
-        val shouldTrigger = when {
-            !keywordActive && !packageActive -> {
-                Log.d("AlertListener", "  → 둘 다 비활성, 스킵")
-                false
+        // 등록된 모든 활성 규칙에 대해 매칭 시도. 첫 번째 매칭되는 규칙만 발동.
+        val matched = rules.firstOrNull { rule ->
+            val keywordActive = rule.keywordEnabled && rule.keyword.isNotBlank()
+            val packageActive = !rule.packageName.isNullOrBlank()
+            val keywordMatch = keywordActive && (title.contains(rule.keyword) || text.contains(rule.keyword))
+            val packageMatch = packageActive && packageName == rule.packageName
+            when {
+                !keywordActive && !packageActive -> false
+                keywordActive && packageActive -> keywordMatch && packageMatch
+                keywordActive -> keywordMatch
+                else -> packageMatch
             }
-            keywordActive && packageActive -> {
-                val ok = keywordMatch && packageMatch
-                Log.d("AlertListener", "  → AND 모드: keyword=$keywordMatch package=$packageMatch → $ok")
-                ok
-            }
-            keywordActive -> {
-                Log.d("AlertListener", "  → 키워드만: $keywordMatch")
-                keywordMatch
-            }
-            else -> {
-                Log.d("AlertListener", "  → 앱만: 대상='$targetPackage' 실제='$packageName' → $packageMatch")
-                packageMatch
-            }
-        }
+        } ?: return
 
-        if (!shouldTrigger) {
-            Log.d("AlertListener", "  ✗ 스킵")
+        // 글로벌 디바운스
+        val now = System.currentTimeMillis()
+        if ((now - lastTriggerTime) < debounceMs) {
+            Log.d("AlertListener", "디바운스: ${now - lastTriggerTime}ms 이내 재트리거, 무시")
             return
         }
+        lastTriggerTime = now
 
-        Log.d("AlertListener", "  ✓ 매칭! 효과 발동")
+        Log.d("AlertListener", "✓ 매칭 [$packageName] 규칙='${matched.name}' (id=${matched.id})")
 
         val overlayIntent = Intent(this, OverlayService::class.java)
         overlayIntent.putExtra("sourcePackage", packageName)
+        overlayIntent.putExtra("ruleId", matched.id)
         startService(overlayIntent)
     }
 }

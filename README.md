@@ -2,7 +2,7 @@
 
 안드로이드용 알림 커스터마이징 앱. 특정 키워드 또는 앱에서 알림이 왔을 때 사용자가 등록한 미디어(이미지·GIF·동영상)와 사운드를 화면 위에 띄워주고, 물리학 기반 애니메이션으로 표현한다.
 
-> **상태**: MVP 개발 중. 단일 규칙만 지원. 다중 규칙(Room DB 또는 JSON)은 향후 작업.
+> **상태**: MVP 개발 중. 단일 규칙만 지원. 다중 규칙(JSON 직렬화 + 규칙 목록 UI)은 작업 중.
 
 ---
 
@@ -15,7 +15,7 @@
   - `NotificationListenerService` — 시스템 알림 가로채기
   - `SYSTEM_ALERT_WINDOW` — 화면 위 오버레이
   - `WindowManager.updateViewLayout` — 윈도우 위치를 직접 이동시켜 화면 어디든 갈 수 있음
-- **데이터 저장**: SharedPreferences (단일 규칙). 키 이름은 아래 "데이터 모델" 참조
+- **데이터 저장**: SharedPreferences (단일 규칙). 다중 규칙으로 전환 시 JSONArray + JSONObject 직접 사용 예정 (외부 의존성 추가 X)
 - **테스트 폰**: Samsung Galaxy SM-S937N
 - **Android Studio**: Panda 4 (2025.3.4)
 
@@ -32,6 +32,10 @@
   - 앱만 선택 → 그 앱의 모든 알림
   - 둘 다 활성 → AND (그 앱의 그 키워드만)
   - 둘 다 비활성 → 발동 안 함
+- **글로벌 디바운스**: 매칭된 트리거 후 800ms 이내 새 트리거는 무시
+  - 카톡 등에서 알림이 갱신되면서 같은 메시지에 대해 onNotificationPosted가 여러 번 호출되는 현상 방지
+  - 의도된 다른 알림도 800ms 이내면 무시되니, 이 시간이 너무 길면 `AlertNotificationListener.kt`의 `debounceMs` 상수 조정
+  - 권장 값: 500~1500ms
 
 ### 미디어 (어떤 시각 효과를 띄울지)
 - **이미지**: JPG/PNG/WebP/GIF (Android 9+에서 GIF·WebP 애니메이션 자동 재생)
@@ -73,6 +77,7 @@
 - **OFF (기본)**: 새 알람 오면 이전 미디어 사라짐
 - **ON**: 여러 알람의 미디어가 동시에 화면에 떠있음 (최대 10개)
 - 구현: `OverlayInstance` 내부 클래스로 각 알림 상태 캡슐화 (view, params, mediaPlayer, videoView, dismissRunnable, velocityTracker)
+- `cleanup(checkStopSelf: Boolean = true)` 매개변수로 새 알람 대비 정리 시엔 `stopSelf` 호출 안 함 (그래야 새 인스턴스가 onDestroy로 휘말려 같이 정리되지 않음)
 
 ### UI
 - **메인 설정 화면**: 핵심 옵션만 (키워드, 앱, 미디어, 사운드, 등장 애니메이션 ON/OFF, 등장 모드, 테스트 재생)
@@ -87,7 +92,7 @@
 app/src/main/
 ├── java/com/example/myapplication/
 │   ├── MainActivity.kt            # Compose 설정 화면 + AppPickerDialog
-│   ├── AlertNotificationListener.kt  # NotificationListenerService — 매칭 로직
+│   ├── AlertNotificationListener.kt  # NotificationListenerService — 매칭 + 디바운스
 │   ├── OverlayService.kt          # SYSTEM_ALERT_WINDOW 오버레이 + 물리학 애니메이션
 │   └── ui/theme/                  # Compose 테마
 ├── res/
@@ -114,7 +119,7 @@ app/src/main/
 
 ## 데이터 모델 (SharedPreferences)
 
-파일 이름: `"rules"`
+파일 이름: `"rules"` (단일 규칙 시절). 다중 규칙 전환 후 별도 마이그레이션 예정.
 
 ### 매칭
 | 키 | 타입 | 기본값 | 설명 |
@@ -174,6 +179,29 @@ app/src/main/
 
 ---
 
+## 동작 정책 (중요)
+
+### 디바운스 (중복 알림 방지)
+`AlertNotificationListener`에서 매칭이 성공한 트리거 후 `debounceMs` (기본 800ms) 이내 발생하는 새 매칭은 모두 무시한다. 이는 다음 현상을 막기 위함:
+- 카톡, 디스코드 같은 앱은 한 메시지에 대해 알림을 여러 번 갱신하면서 `onNotificationPosted`를 호출
+- 같은 `sbn.key`로 오는 경우도 있고 다른 `sbn.key`로 오는 경우도 있어 키 기반 디바운스로는 부족
+- 따라서 글로벌 시간 기반 디바운스 사용
+
+트레이드오프: 진짜로 짧은 시간 안에 다른 알림 두 개가 와도 두 번째는 무시됨. `debounceMs` 값을 줄이면(예: 300ms) 더 민감하게, 늘리면 더 보수적으로 동작.
+
+### 알람 중첩 OFF시 화면 정리 순서
+새 알람이 들어와 알람 중첩이 OFF인 경우:
+1. `instances.toList().forEach { it.cleanup(checkStopSelf = false) }` — 기존 인스턴스 정리, 단 stopSelf는 호출 안 함
+2. 새 `OverlayInstance` 생성 + 추가
+3. `showOverlay`로 새 미디어 표시
+
+`cleanup(checkStopSelf = true)` 기본값으로 호출되는 경우(자연스러운 dismiss):
+- 인스턴스 정리 후 `instances`가 비어있으면 `stopSelf()` 호출 → 서비스 종료
+
+이 분리가 없으면 새 알람이 와도 화면에 미디어가 안 나타나는 버그 발생 (시스템이 stopSelf 영향으로 onDestroy 호출하면서 새 인스턴스도 정리됨).
+
+---
+
 ## 빌드 / 실행
 
 1. Android Studio (Panda 4 권장)에서 프로젝트 열기
@@ -189,7 +217,7 @@ app/src/main/
 ## 디버깅
 
 ### Logcat 태그
-- `AlertListener` — 알림 매칭 흐름 (어떤 알림이 들어왔고 매칭 결과가 어떻게 나왔는지)
+- `AlertListener` — 알림 매칭 흐름 (어떤 알림이 들어왔고 매칭 결과가 어떻게 나왔는지, 디바운스 통과/스킵)
 - `OverlayService` — 오버레이 동작 (사운드 재생, 시각 효과 등)
 
 ### 자주 만나는 문제
@@ -197,13 +225,15 @@ app/src/main/
 - **OEM 배터리 매니저(샤오미/화웨이/오포 등)가 백그라운드 서비스 종료** → 배터리 최적화 제외 권장
 - **카톡 그룹 알림이 매칭 안 됨** → 일부 알림은 다른 패키지명으로 옴. Logcat에서 실제 패키지명 확인
 - **`<?xml ...?>` 두 번 박힘 에러** → Android Studio Image Asset Studio가 만든 XML이 가끔 망가짐. 직접 XML 작성 또는 mipmap webp만 사용
+- **알람 중첩 OFF인데 알림 와도 미디어 안 뜸** → `cleanup(checkStopSelf = false)` 분리가 안 된 버전. 위 "동작 정책" 참조
+- **카톡 등에서 한 메시지에 두 개의 미디어가 동시에 뜸** → 디바운스 시간(`debounceMs`) 늘리기 (1000~1500ms)
 
 ---
 
 ## 향후 작업 (TODO)
 
-### 우선순위 높음
-- [ ] **다중 규칙 지원** — 현재 단일 규칙만. SharedPreferences + JSON 리스트 또는 Room DB 도입. 메인 화면을 규칙 목록 + 추가 버튼 구조로 재구성. 규칙별로 모든 옵션을 따로 가짐.
+### 우선순위 높음 (작업 중)
+- [ ] **다중 규칙 지원** — JSON 직렬화 + RuleStore 클래스 + 규칙 목록 UI + 규칙 편집 화면. SharedPreferences에 JSONArray로 저장. AlertNotificationListener는 모든 활성 규칙에 대해 매칭, OverlayService는 매칭된 ruleId로 해당 규칙의 설정 사용.
 
 ### 우선순위 중간
 - [ ] **연락처 기반 매칭** — `READ_CONTACTS` 권한, 연락처 선택 UI, 전화/문자 발신자 매칭
@@ -219,11 +249,12 @@ app/src/main/
 
 ## 알려진 이슈 / 제약
 
-- 단일 규칙만 저장 가능 (다중 규칙은 미구현)
+- 단일 규칙만 저장 가능 (다중 규칙은 작업 중)
 - 동영상이 회전할 때 정사각 영역 외부가 잘릴 수 있음
 - 알람 중첩 ON일 때 11번째 알람부터는 가장 오래된 것부터 자동 제거 (메모리 보호, 최대 10개)
 - 시스템 헤드업 알림 배너는 본 앱과 별개로 폰이 따로 띄움 (사용자 폰 설정에서 끌 수 있음)
 - 키워드 OFF + 앱 매칭 시 일부 패키지명이 알림 송신 시 미묘하게 다를 수 있음 (예: 카톡 그룹 알림). Logcat의 `AlertListener` 로그로 실제 패키지명 확인 후 그 값으로 등록
+- 글로벌 디바운스로 인해 빠르게 들어오는 다른 알림 두 개 중 두 번째는 무시될 수 있음 (의도된 트레이드오프)
 
 ---
 
@@ -232,7 +263,7 @@ app/src/main/
 기본 Android Compose 프로젝트 템플릿 그대로:
 - AndroidX Core, Activity Compose, Material3
 - Compose BOM
-- (Lottie, Coil, Room 등 외부 라이브러리는 아직 사용 안 함)
+- (Lottie, Coil, Room, Gson 등 외부 라이브러리는 아직 사용 안 함)
 
 ---
 

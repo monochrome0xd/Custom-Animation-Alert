@@ -4,9 +4,7 @@ import android.animation.Animator
 import android.animation.AnimatorListenerAdapter
 import android.animation.ValueAnimator
 import android.app.Service
-import android.content.Context
 import android.content.Intent
-import android.content.SharedPreferences
 import android.graphics.ImageDecoder
 import android.graphics.Outline
 import android.graphics.PixelFormat
@@ -38,7 +36,6 @@ import kotlin.math.sqrt
 
 class OverlayService : Service() {
 
-    /** 한 알림에 대한 모든 상태를 캡슐화 */
     private inner class OverlayInstance {
         var view: View? = null
         var params: WindowManager.LayoutParams? = null
@@ -51,7 +48,7 @@ class OverlayService : Service() {
         var centerY = 0
         var sizePx = 0
 
-        fun cleanup() {
+        fun cleanup(checkStopSelf: Boolean = true) {
             if (isCleanedUp) return
             isCleanedUp = true
             dismissRunnable?.let { dismissHandler.removeCallbacks(it) }
@@ -68,7 +65,7 @@ class OverlayService : Service() {
             mediaPlayer = null
             velocityTracker = null
             instances.remove(this)
-            if (instances.isEmpty()) stopSelf()
+            if (checkStopSelf && instances.isEmpty()) stopSelf()
         }
     }
 
@@ -77,75 +74,62 @@ class OverlayService : Service() {
     private val dismissHandler = Handler(Looper.getMainLooper())
     private var screenWidth = 0
     private var screenHeight = 0
-
     private val maxInstances = 10
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
-        val prefs = getSharedPreferences("rules", Context.MODE_PRIVATE)
-        val stackOverlays = prefs.getBoolean("stackOverlays", false)
 
-        // 중첩 OFF면 기존 인스턴스 모두 정리
-        if (!stackOverlays) {
-            instances.toList().forEach { it.cleanup() }
+        val ruleId = intent?.getStringExtra("ruleId")
+        val sourcePackage = intent?.getStringExtra("sourcePackage")
+
+        // ruleId가 있으면 그 규칙 사용. 없으면 (테스트 재생 등) 첫 번째 활성 규칙. 없으면 기본 규칙.
+        val rule = if (ruleId != null) {
+            RuleStore.find(this, ruleId) ?: Rule()
         } else {
-            // 너무 많이 쌓이면 가장 오래된 것 제거
+            RuleStore.loadAll(this).firstOrNull { it.enabled } ?: Rule()
+        }
+
+        if (!rule.stackOverlays) {
+            instances.toList().forEach { it.cleanup(checkStopSelf = false) }
+        } else {
             while (instances.size >= maxInstances) {
-                instances.first().cleanup()
+                instances.first().cleanup(checkStopSelf = false)
             }
         }
 
-        val sourcePackage = intent?.getStringExtra("sourcePackage")
         val instance = OverlayInstance()
         instances.add(instance)
 
-        val soundDurationMs = playSound(instance, prefs)
-        showOverlay(instance, prefs, soundDurationMs, sourcePackage)
+        val soundDurationMs = playSound(instance, rule)
+        showOverlay(instance, rule, soundDurationMs, sourcePackage)
         return START_NOT_STICKY
     }
 
-    private fun shouldSkipSound(prefs: SharedPreferences): Boolean {
-        val playInVibrate = prefs.getBoolean("playInVibrate", false)
-        val playInSilent = prefs.getBoolean("playInSilent", false)
+    private fun shouldSkipSound(rule: Rule): Boolean {
         val audioManager = getSystemService(AUDIO_SERVICE) as AudioManager
         return when (audioManager.ringerMode) {
-            AudioManager.RINGER_MODE_VIBRATE -> !playInVibrate
-            AudioManager.RINGER_MODE_SILENT -> !playInSilent
+            AudioManager.RINGER_MODE_VIBRATE -> !rule.playInVibrate
+            AudioManager.RINGER_MODE_SILENT -> !rule.playInSilent
             else -> false
         }
     }
 
-    private fun effective(
-        prefs: SharedPreferences, key: String, default: Float,
-        randomKey: String, minVal: Float, maxVal: Float
-    ): Float {
-        return if (prefs.getBoolean(randomKey, false)) {
-            (Math.random() * (maxVal - minVal) + minVal).toFloat()
-        } else {
-            prefs.getFloat(key, default)
-        }
+    private fun effective(value: Float, isRandom: Boolean, minVal: Float, maxVal: Float): Float {
+        return if (isRandom) (Math.random() * (maxVal - minVal) + minVal).toFloat() else value
     }
 
     private fun showOverlay(
-        instance: OverlayInstance,
-        prefs: SharedPreferences,
-        soundDurationMs: Int,
-        sourcePackage: String?
+        instance: OverlayInstance, rule: Rule,
+        soundDurationMs: Int, sourcePackage: String?
     ) {
-        val mediaUriStr = prefs.getString("mediaUri", null) ?: prefs.getString("imageUri", null)
-        val mediaType = prefs.getString("mediaType", "image") ?: "image"
-        val useVideoSound = prefs.getBoolean("useVideoSound", true)
-        val skipSound = shouldSkipSound(prefs)
-        val muteVideo = !useVideoSound || skipSound
+        val mediaUriStr = rule.mediaUri
+        val mediaType = rule.mediaType
+        val muteVideo = !rule.useVideoSound || shouldSkipSound(rule)
 
-        val entryAnimation = prefs.getBoolean("entryAnimation", true)
-        val entryMode = prefs.getString("entryMode", "spring") ?: "spring"
-        val dragEnabled = prefs.getBoolean("dragEnabled", true)
-
-        val mediaSizeDp = effective(prefs, "mediaSize", 250f, "mediaSizeRandom", 50f, 600f)
-        val appIconSizeDp = effective(prefs, "appIconSize", 100f, "appIconSizeRandom", 50f, 200f)
+        val mediaSizeDp = effective(rule.mediaSize, rule.mediaSizeRandom, 50f, 600f)
+        val appIconSizeDp = effective(rule.appIconSize, rule.appIconSizeRandom, 50f, 200f)
 
         var hasMedia = false
         var isVideo = false
@@ -161,9 +145,7 @@ class OverlayService : Service() {
                         hasMedia = true
                         instance.videoView = vv
                         return@run vv
-                    } catch (e: Exception) {
-                        Log.e("OverlayService", "동영상 로드 실패", e)
-                    }
+                    } catch (e: Exception) { Log.e("OverlayService", "동영상 로드 실패", e) }
                 } else {
                     try {
                         val iv = ImageView(this).apply { scaleType = ImageView.ScaleType.FIT_CENTER }
@@ -172,16 +154,9 @@ class OverlayService : Service() {
                             val drawable = ImageDecoder.decodeDrawable(source)
                             iv.setImageDrawable(drawable)
                             if (drawable is AnimatedImageDrawable) drawable.start()
-                        } else {
-                            iv.setImageURI(uri)
-                        }
-                        if (iv.drawable != null) {
-                            hasMedia = true
-                            return@run iv
-                        }
-                    } catch (e: Exception) {
-                        Log.e("OverlayService", "이미지 로드 실패", e)
-                    }
+                        } else iv.setImageURI(uri)
+                        if (iv.drawable != null) { hasMedia = true; return@run iv }
+                    } catch (e: Exception) { Log.e("OverlayService", "이미지 로드 실패", e) }
                 }
             }
             if (sourcePackage != null) {
@@ -200,9 +175,7 @@ class OverlayService : Service() {
                     hasMedia = true
                     isAppIcon = true
                     return@run iv
-                } catch (e: Exception) {
-                    Log.e("OverlayService", "앱 아이콘 로드 실패", e)
-                }
+                } catch (e: Exception) { Log.e("OverlayService", "앱 아이콘 로드 실패", e) }
             }
             TextView(this).apply { text = "HEART"; textSize = 100f }
         }
@@ -211,8 +184,7 @@ class OverlayService : Service() {
 
         val type = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
-        else
-            WindowManager.LayoutParams.TYPE_PHONE
+        else WindowManager.LayoutParams.TYPE_PHONE
 
         val sizePx = if (isAppIcon) (appIconSizeDp * resources.displayMetrics.density).toInt()
         else (mediaSizeDp * resources.displayMetrics.density).toInt()
@@ -224,9 +196,9 @@ class OverlayService : Service() {
 
         var flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                 WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
-        if (!dragEnabled) flags = flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+        if (!rule.dragEnabled) flags = flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
 
-        val useMarble = entryAnimation && entryMode == "marble"
+        val useMarble = rule.entryAnimation && rule.entryMode == "marble"
 
         val params = WindowManager.LayoutParams(
             if (hasMedia) sizePx else WindowManager.LayoutParams.WRAP_CONTENT,
@@ -235,23 +207,20 @@ class OverlayService : Service() {
         ).apply {
             gravity = Gravity.TOP or Gravity.START
             x = if (useMarble) (Math.random() * (screenWidth - sizePx)).toInt() else instance.centerX
-            y = if (entryAnimation) screenHeight else instance.centerY
+            y = if (rule.entryAnimation) screenHeight else instance.centerY
         }
         instance.params = params
 
-        try {
-            windowManager?.addView(view, params)
-        } catch (e: Exception) {
-            instance.cleanup()
-            return
+        try { windowManager?.addView(view, params) } catch (e: Exception) {
+            instance.cleanup(); return
         }
 
-        if (entryAnimation) {
-            if (entryMode == "marble") {
-                val bouncePeak = effective(prefs, "bouncePeak", 0.5f, "bouncePeakRandom", 0.3f, 0.8f)
-                val gravityScale = effective(prefs, "gravityScale", 1.0f, "gravityScaleRandom", 0.5f, 2.5f)
-                val spinScale = effective(prefs, "spinScale", 1.0f, "spinScaleRandom", 0f, 3f)
-                val elasticity = effective(prefs, "elasticity", 0.5f, "elasticityRandom", 0f, 1f)
+        if (rule.entryAnimation) {
+            if (rule.entryMode == "marble") {
+                val bouncePeak = effective(rule.bouncePeak, rule.bouncePeakRandom, 0.3f, 0.8f)
+                val gravityScale = effective(rule.gravityScale, rule.gravityScaleRandom, 0.5f, 2.5f)
+                val spinScale = effective(rule.spinScale, rule.spinScaleRandom, 0f, 3f)
+                val elasticity = effective(rule.elasticity, rule.elasticityRandom, 0f, 1f)
                 playMarblePhysics(instance, bouncePeak, gravityScale, spinScale, elasticity)
             } else {
                 animateInstanceTo(instance, params.y, instance.centerY, 700, OvershootInterpolator(1.5f))
@@ -270,7 +239,7 @@ class OverlayService : Service() {
             scheduleDismiss(instance, soundDurationMs.coerceAtLeast(3000).toLong())
         }
 
-        if (dragEnabled) attachTouchHandler(instance)
+        if (rule.dragEnabled) attachTouchHandler(instance, rule)
     }
 
     private fun animateInstanceTo(
@@ -304,7 +273,6 @@ class OverlayService : Service() {
         val startX = params.x.toFloat()
         val startY = screenHeight.toFloat()
         val groundY = (screenHeight - sizePx - 30f * density)
-
         val peakY = (1f - bouncePeak) * screenHeight
         val peakHeight = startY - peakY
         val v0y = -sqrt(2f * g * peakHeight)
@@ -345,10 +313,7 @@ class OverlayService : Service() {
                 if (currentY >= groundY && currentVy > 0) {
                     currentY = groundY
                     currentVy = -currentVy * elasticity
-                    if (abs(currentVy) < bounceCutoff) {
-                        currentVy = 0f
-                        rolling = true
-                    }
+                    if (abs(currentVy) < bounceCutoff) { currentVy = 0f; rolling = true }
                 }
             } else {
                 currentY = groundY
@@ -365,7 +330,6 @@ class OverlayService : Service() {
             params.y = currentY.toInt()
             rotation += (currentVx * dt) / radius * (180f / Math.PI.toFloat()) * spinScale
             view.rotation = rotation
-
             instance.centerX = currentX.toInt()
             instance.centerY = currentY.toInt()
             try { windowManager?.updateViewLayout(view, params) } catch (_: Exception) {}
@@ -373,7 +337,7 @@ class OverlayService : Service() {
         animator.start()
     }
 
-    private fun attachTouchHandler(instance: OverlayInstance) {
+    private fun attachTouchHandler(instance: OverlayInstance, rule: Rule) {
         val view = instance.view ?: return
         val params = instance.params ?: return
         var initialTouchX = 0f
@@ -406,16 +370,13 @@ class OverlayService : Service() {
                     true
                 }
                 MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                    val prefs = getSharedPreferences("rules", Context.MODE_PRIVATE)
-                    val flingToDismiss = prefs.getBoolean("flingToDismiss", true)
-                    val tapToDismiss = prefs.getBoolean("tapToDismiss", false)
                     val dt = System.currentTimeMillis() - downTime
                     val dx = event.rawX - initialTouchX
                     val dy = event.rawY - initialTouchY
                     val moveDist = sqrt((dx * dx + dy * dy).toDouble())
                     val isTap = dt < 200 && moveDist < 30
 
-                    if (isTap && tapToDismiss) {
+                    if (isTap && rule.tapToDismiss) {
                         view.animate().alpha(0f).scaleX(0.5f).scaleY(0.5f)
                             .setDuration(200).withEndAction { instance.cleanup() }.start()
                     } else {
@@ -423,7 +384,7 @@ class OverlayService : Service() {
                         val vx = instance.velocityTracker?.xVelocity ?: 0f
                         val vy = instance.velocityTracker?.yVelocity ?: 0f
                         val speed = sqrt((vx * vx + vy * vy).toDouble())
-                        if (flingToDismiss && speed > 1500.0) {
+                        if (rule.flingToDismiss && speed > 1500.0) {
                             flingTo(instance, params.x + (vx * 0.5f).toInt(), params.y + (vy * 0.5f).toInt())
                         } else {
                             springBackTo(instance)
@@ -484,17 +445,11 @@ class OverlayService : Service() {
         dismissHandler.postDelayed(r, delayMs)
     }
 
-    private fun playSound(instance: OverlayInstance, prefs: SharedPreferences): Int {
-        val volume = prefs.getFloat("volume", 1.0f)
-        val mediaType = prefs.getString("mediaType", "image") ?: "image"
-        val useVideoSound = prefs.getBoolean("useVideoSound", true)
-        val mediaUriStr = prefs.getString("mediaUri", null)
+    private fun playSound(instance: OverlayInstance, rule: Rule): Int {
+        if (rule.mediaType == "video" && rule.mediaUri != null && rule.useVideoSound) return 0
+        if (shouldSkipSound(rule)) return 0
 
-        if (mediaType == "video" && mediaUriStr != null && useVideoSound) return 0
-        if (shouldSkipSound(prefs)) return 0
-
-        val soundUriStr = prefs.getString("soundUri", null)
-        val uri = soundUriStr?.let { Uri.parse(it) }
+        val uri = rule.soundUri?.let { Uri.parse(it) }
             ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
 
         return try {
@@ -506,7 +461,7 @@ class OverlayService : Service() {
             mp.setOnCompletionListener { it.release() }
             mp.setOnErrorListener { player, _, _ -> player.release(); true }
             mp.prepare()
-            mp.setVolume(volume, volume)
+            mp.setVolume(rule.volume, rule.volume)
             mp.start()
             instance.mediaPlayer = mp
             mp.duration
@@ -518,7 +473,7 @@ class OverlayService : Service() {
 
     override fun onDestroy() {
         super.onDestroy()
-        instances.toList().forEach { it.cleanup() }
+        instances.toList().forEach { it.cleanup(checkStopSelf = false) }
         instances.clear()
     }
 }
