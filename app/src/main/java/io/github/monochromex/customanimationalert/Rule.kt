@@ -1,6 +1,4 @@
-package com.example.myapplication
-
-package com.example.myapplication
+package io.github.monochromex.customanimationalert
 
 import android.content.Context
 import android.util.Log
@@ -8,65 +6,75 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.util.UUID
 
+
 data class Rule(
     val id: String = UUID.randomUUID().toString(),
-    val name: String = "새 규칙",
+    val name: String = "",
+    val groupName: String = "기본",
     val enabled: Boolean = true,
 
-    // 매칭
     val keywordEnabled: Boolean = true,
-    val keyword: String = "",
+    val keywords: List<String> = emptyList(),
     val packageName: String? = null,
     val appLabel: String? = null,
 
-    // 미디어
     val mediaUri: String? = null,
     val mediaType: String = "image",
     val mediaName: String? = null,
+    val mediaLoop: Boolean = true,
+    val targetXFraction: Float = 0.5f,  // 미디어가 등장할 화면 X 위치 (0=좌, 1=우)
+    val targetYFraction: Float = 0.5f,  // 미디어가 등장할 화면 Y 위치 (0=상, 1=하)
+    val targetRotation: Float = 0f,      // 회전 각도 (도)
     val useVideoSound: Boolean = true,
     val mediaSize: Float = 250f,
     val mediaSizeRandom: Boolean = false,
-    val appIconSize: Float = 100f,
+    val appIconSize: Float = 50f,
     val appIconSizeRandom: Boolean = false,
 
-    // 사운드
     val soundUri: String? = null,
     val soundName: String? = null,
     val volume: Float = 1.0f,
-    val playInVibrate: Boolean = false,
+    val playInVibrate: Boolean = true,
     val playInSilent: Boolean = false,
 
-    // 애니메이션
     val entryAnimation: Boolean = true,
-    val entryMode: String = "spring",
+    val entryMode: String = "marble",
     val bouncePeak: Float = 0.5f,
     val bouncePeakRandom: Boolean = false,
-    val gravityScale: Float = 1.0f,
+    val gravityScale: Float = 2.5f,
     val gravityScaleRandom: Boolean = false,
-    val spinScale: Float = 1.0f,
+    val spinScale: Float = 3.0f,
     val spinScaleRandom: Boolean = false,
-    val elasticity: Float = 0.5f,
+    val elasticity: Float = 0.4f,
     val elasticityRandom: Boolean = false,
+    val floorOffset: Float = 16f,
 
-    // 인터랙션
     val dragEnabled: Boolean = true,
     val flingToDismiss: Boolean = true,
-    val tapToDismiss: Boolean = false,
+    val tapToDismiss: Boolean = true,
 
-    // 알림 처리
-    val stackOverlays: Boolean = false
+    val stackOverlays: Boolean = true,
+    val wakeScreen: Boolean = false,
+    val blockSameContentRepeat: Boolean = true,
+    val sameContentCooldownSec: Int = 5,  // 같은 내용을 다시 받기까지의 쿨타임 (초)
+    val playAlongside: Boolean = false  // 다른 규칙이 가장 구체적이어도 이 규칙이 같이 발동
 ) {
     fun toJson(): JSONObject = JSONObject().apply {
         put("id", id)
         put("name", name)
+        put("groupName", groupName)
         put("enabled", enabled)
         put("keywordEnabled", keywordEnabled)
-        put("keyword", keyword)
+        put("keywords", JSONArray().apply { keywords.forEach { put(it) } })
         put("packageName", packageName ?: JSONObject.NULL)
         put("appLabel", appLabel ?: JSONObject.NULL)
         put("mediaUri", mediaUri ?: JSONObject.NULL)
         put("mediaType", mediaType)
         put("mediaName", mediaName ?: JSONObject.NULL)
+        put("mediaLoop", mediaLoop)
+        put("targetXFraction", targetXFraction.toDouble())
+        put("targetYFraction", targetYFraction.toDouble())
+        put("targetRotation", targetRotation.toDouble())
         put("useVideoSound", useVideoSound)
         put("mediaSize", mediaSize.toDouble())
         put("mediaSizeRandom", mediaSizeRandom)
@@ -87,24 +95,43 @@ data class Rule(
         put("spinScaleRandom", spinScaleRandom)
         put("elasticity", elasticity.toDouble())
         put("elasticityRandom", elasticityRandom)
+        put("floorOffset", floorOffset.toDouble())
         put("dragEnabled", dragEnabled)
         put("flingToDismiss", flingToDismiss)
         put("tapToDismiss", tapToDismiss)
         put("stackOverlays", stackOverlays)
+        put("wakeScreen", wakeScreen)
+        put("blockSameContentRepeat", blockSameContentRepeat)
+        put("sameContentCooldownSec", sameContentCooldownSec)
+        put("playAlongside", playAlongside)
     }
 
     companion object {
         fun fromJson(obj: JSONObject): Rule = Rule(
             id = obj.optString("id", UUID.randomUUID().toString()),
-            name = obj.optString("name", "새 규칙"),
+            name = obj.optString("name", ""),
+            groupName = obj.optString("groupName", "기본").ifBlank { "기본" },
             enabled = obj.optBoolean("enabled", true),
             keywordEnabled = obj.optBoolean("keywordEnabled", true),
-            keyword = obj.optString("keyword", ""),
+            keywords = run {
+                // 새 포맷 (배열) 우선, 없으면 기존 단일 keyword 문자열에서 마이그레이션
+                val arr = obj.optJSONArray("keywords")
+                if (arr != null) {
+                    (0 until arr.length()).map { arr.optString(it) }.filter { it.isNotBlank() }
+                } else {
+                    val single = obj.optString("keyword", "")
+                    if (single.isBlank()) emptyList() else listOf(single)
+                }
+            },
             packageName = if (obj.isNull("packageName")) null else obj.optString("packageName", null),
             appLabel = if (obj.isNull("appLabel")) null else obj.optString("appLabel", null),
             mediaUri = if (obj.isNull("mediaUri")) null else obj.optString("mediaUri", null),
             mediaType = obj.optString("mediaType", "image"),
             mediaName = if (obj.isNull("mediaName")) null else obj.optString("mediaName", null),
+            mediaLoop = obj.optBoolean("mediaLoop", true),
+            targetXFraction = obj.optDouble("targetXFraction", 0.5).toFloat(),
+            targetYFraction = obj.optDouble("targetYFraction", 0.5).toFloat(),
+            targetRotation = obj.optDouble("targetRotation", 0.0).toFloat(),
             useVideoSound = obj.optBoolean("useVideoSound", true),
             mediaSize = obj.optDouble("mediaSize", 250.0).toFloat(),
             mediaSizeRandom = obj.optBoolean("mediaSizeRandom", false),
@@ -125,10 +152,15 @@ data class Rule(
             spinScaleRandom = obj.optBoolean("spinScaleRandom", false),
             elasticity = obj.optDouble("elasticity", 0.5).toFloat(),
             elasticityRandom = obj.optBoolean("elasticityRandom", false),
+            floorOffset = obj.optDouble("floorOffset", 16.0).toFloat(),
             dragEnabled = obj.optBoolean("dragEnabled", true),
             flingToDismiss = obj.optBoolean("flingToDismiss", true),
             tapToDismiss = obj.optBoolean("tapToDismiss", false),
-            stackOverlays = obj.optBoolean("stackOverlays", false)
+            stackOverlays = obj.optBoolean("stackOverlays", false),
+            wakeScreen = obj.optBoolean("wakeScreen", false),
+            blockSameContentRepeat = obj.optBoolean("blockSameContentRepeat", true),
+            sameContentCooldownSec = obj.optInt("sameContentCooldownSec", 5),
+            playAlongside = obj.optBoolean("playAlongside", false)
         )
     }
 }
@@ -140,7 +172,6 @@ object RuleStore {
 
     fun loadAll(context: Context): List<Rule> {
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        // 첫 실행 시 v1 단일 규칙 마이그레이션
         if (!prefs.getBoolean(KEY_MIGRATED, false)) {
             migrateFromV1(context)
             prefs.edit().putBoolean(KEY_MIGRATED, true).apply()
@@ -162,9 +193,7 @@ object RuleStore {
         prefs.edit().putString(KEY_RULES, arr.toString()).apply()
     }
 
-    fun find(context: Context, id: String): Rule? {
-        return loadAll(context).find { it.id == id }
-    }
+    fun find(context: Context, id: String): Rule? = loadAll(context).find { it.id == id }
 
     fun upsert(context: Context, rule: Rule) {
         val list = loadAll(context).toMutableList()
@@ -180,20 +209,24 @@ object RuleStore {
 
     private fun migrateFromV1(context: Context) {
         val v1 = context.getSharedPreferences("rules", Context.MODE_PRIVATE)
-        // v1에 데이터가 있는지 (단일 규칙 시절 데이터)
         if (!v1.contains("keyword") && !v1.contains("packageName")) return
 
         val migrated = Rule(
             id = UUID.randomUUID().toString(),
             name = v1.getString("appLabel", null) ?: v1.getString("keyword", "기본 규칙") ?: "기본 규칙",
+            groupName = "기본",
             enabled = true,
             keywordEnabled = v1.getBoolean("keywordEnabled", true),
-            keyword = v1.getString("keyword", "") ?: "",
+            keywords = (v1.getString("keyword", "") ?: "").let { if (it.isBlank()) emptyList() else listOf(it) },
             packageName = v1.getString("packageName", null),
             appLabel = v1.getString("appLabel", null),
             mediaUri = v1.getString("mediaUri", null) ?: v1.getString("imageUri", null),
             mediaType = v1.getString("mediaType", "image") ?: "image",
             mediaName = v1.getString("mediaName", null),
+            mediaLoop = v1.getBoolean("mediaLoop", true),
+            targetXFraction = v1.getFloat("targetXFraction", 0.5f),
+            targetYFraction = v1.getFloat("targetYFraction", 0.5f),
+            targetRotation = v1.getFloat("targetRotation", 0f),
             useVideoSound = v1.getBoolean("useVideoSound", true),
             mediaSize = v1.getFloat("mediaSize", 250f),
             mediaSizeRandom = v1.getBoolean("mediaSizeRandom", false),
@@ -214,12 +247,17 @@ object RuleStore {
             spinScaleRandom = v1.getBoolean("spinScaleRandom", false),
             elasticity = v1.getFloat("elasticity", 0.5f),
             elasticityRandom = v1.getBoolean("elasticityRandom", false),
+            floorOffset = v1.getFloat("floorOffset", 16f),
             dragEnabled = v1.getBoolean("dragEnabled", true),
             flingToDismiss = v1.getBoolean("flingToDismiss", true),
             tapToDismiss = v1.getBoolean("tapToDismiss", false),
-            stackOverlays = v1.getBoolean("stackOverlays", false)
+            stackOverlays = v1.getBoolean("stackOverlays", false),
+            wakeScreen = v1.getBoolean("wakeScreen", false),
+            blockSameContentRepeat = v1.getBoolean("blockSameContentRepeat", true),
+            sameContentCooldownSec = v1.getInt("sameContentCooldownSec", 5),
+            playAlongside = v1.getBoolean("playAlongside", false)
         )
         saveAll(context, listOf(migrated))
-        Log.d("RuleStore", "v1 → v2 마이그레이션 완료: ${migrated.name}")
+        Log.d("RuleStore", "v1 → v2 마이그레이션 완료")
     }
 }

@@ -1,4 +1,4 @@
-package com.example.myapplication
+package io.github.monochromex.customanimationalert
 
 import org.junit.Test
 
