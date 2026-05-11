@@ -15,6 +15,7 @@ data class Rule(
 
     val keywordEnabled: Boolean = true,
     val keywords: List<String> = emptyList(),
+    val negativeKeywords: List<String> = emptyList(),  // 매칭되면 발동 차단
     val packageName: String? = null,
     val appLabel: String? = null,
 
@@ -66,6 +67,7 @@ data class Rule(
         put("enabled", enabled)
         put("keywordEnabled", keywordEnabled)
         put("keywords", JSONArray().apply { keywords.forEach { put(it) } })
+        put("negativeKeywords", JSONArray().apply { negativeKeywords.forEach { put(it) } })
         put("packageName", packageName ?: JSONObject.NULL)
         put("appLabel", appLabel ?: JSONObject.NULL)
         put("mediaUri", mediaUri ?: JSONObject.NULL)
@@ -122,6 +124,11 @@ data class Rule(
                     val single = obj.optString("keyword", "")
                     if (single.isBlank()) emptyList() else listOf(single)
                 }
+            },
+            negativeKeywords = run {
+                val arr = obj.optJSONArray("negativeKeywords")
+                if (arr != null) (0 until arr.length()).map { arr.optString(it) }.filter { it.isNotBlank() }
+                else emptyList()
             },
             packageName = if (obj.isNull("packageName")) null else obj.optString("packageName", null),
             appLabel = if (obj.isNull("appLabel")) null else obj.optString("appLabel", null),

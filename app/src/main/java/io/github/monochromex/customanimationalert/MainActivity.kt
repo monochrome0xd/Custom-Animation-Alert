@@ -673,6 +673,7 @@ fun RuleCard(
     onToggleEnabled: (Boolean) -> Unit
 ) {
     var menuExpanded by remember { mutableStateOf(false) }
+    val context = LocalContext.current
 
     Surface(
         modifier = Modifier
@@ -707,6 +708,18 @@ fun RuleCard(
                         expanded = menuExpanded,
                         onDismissRequest = { menuExpanded = false }
                     ) {
+                        DropdownMenuItem(
+                            text = { Text("재생") },
+                            onClick = {
+                                menuExpanded = false
+                                val intent = Intent(context, OverlayService::class.java)
+                                intent.putExtra("ruleId", rule.id)
+                                if (rule.mediaUri == null && rule.packageName != null) {
+                                    intent.putExtra("sourcePackage", rule.packageName)
+                                }
+                                context.startService(intent)
+                            }
+                        )
                         DropdownMenuItem(
                             text = { Text("삭제") },
                             onClick = {
@@ -1416,6 +1429,19 @@ fun RuleEditScreen(
         }
 
         if (showAdvanced) {
+            Text("네거티브 키워드", style = MaterialTheme.typography.bodyMedium)
+            Text(
+                "설정해둔 키워드론 알림이 재생되지 않습니다",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            KeywordListEditor(
+                keywords = rule.negativeKeywords,
+                onChange = { rule = rule.copy(negativeKeywords = it) }
+            )
+
+            HorizontalDivider()
+
             SliderRow("앱 아이콘 크기: ${rule.appIconSize.toInt()}dp",
                 rule.appIconSize, rule.appIconSizeRandom, 25f..200f,
                 { rule = rule.copy(appIconSize = it) },

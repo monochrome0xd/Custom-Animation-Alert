@@ -69,8 +69,14 @@ class AlertNotificationListener : NotificationListenerService() {
                 keywordActive -> keywordMatch
                 else -> packageMatch
             }
-            if (!matches) null
-            else Scored(rule, when {
+            if (!matches) return@mapNotNull null
+            // 네거티브 키워드: 제목/본문에 하나라도 포함되면 발동 안 함
+            val negKeywords = rule.negativeKeywords.filter { it.isNotBlank() }
+            if (negKeywords.any { neg -> title.contains(neg) || text.contains(neg) }) {
+                Log.d("AlertListener", "  ↳ 규칙 '${rule.name}' 네거티브 키워드 매칭 → 차단")
+                return@mapNotNull null
+            }
+            Scored(rule, when {
                 keywordActive && packageActive -> 3
                 keywordActive -> 2
                 else -> 1
