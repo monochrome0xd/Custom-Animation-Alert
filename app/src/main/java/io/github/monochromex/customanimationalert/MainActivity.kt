@@ -69,12 +69,14 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AssistChipDefaults
 import androidx.compose.material3.Checkbox
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
@@ -89,6 +91,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -118,6 +121,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.roundToInt
@@ -1107,6 +1111,7 @@ fun RuleEditScreen(
 
     var showAppPicker by remember { mutableStateOf(false) }
     var showAdvanced by remember { mutableStateOf(false) }
+    var showUrlImportDialog by remember { mutableStateOf(false) }
 
     val mediaPicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.PickVisualMedia()
@@ -1343,7 +1348,10 @@ fun RuleEditScreen(
         // 동영상 + 동영상 사운드 사용 ON일 때는 사운드 선택 숨김
         if (!isVideoSelected || !rule.useVideoSound) {
             Text(if (rule.soundName != null) "선택됨: ${rule.soundName}" else "기본 알림음")
-            Button(onClick = { soundPicker.launch(arrayOf("audio/*")) }) { Text("사운드 선택") }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(onClick = { soundPicker.launch(arrayOf("audio/*")) }) { Text("사운드 선택") }
+                OutlinedButton(onClick = { showUrlImportDialog = true }) { Text("URL로 가져오기") }
+            }
         }
 
         Text("음량: ${(rule.volume * 100).toInt()}%")
@@ -1569,6 +1577,101 @@ fun RuleEditScreen(
                 showAppPicker = false
             }
         )
+    }
+
+    if (showUrlImportDialog) {
+        SoundUrlImportDialog(
+            onDismiss = { showUrlImportDialog = false },
+            onImported = { uri, name ->
+                rule = rule.copy(soundUri = uri, soundName = name)
+                showUrlImportDialog = false
+            }
+        )
+    }
+}
+
+@Composable
+fun SoundUrlImportDialog(
+    onDismiss: () -> Unit,
+    onImported: (uri: String, name: String) -> Unit
+) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var url by remember { mutableStateOf("") }
+    var downloading by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf<String?>(null) }
+
+    Dialog(onDismissRequest = { if (!downloading) onDismiss() }) {
+        Surface(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(20.dp),
+            color = MaterialTheme.colorScheme.surface
+        ) {
+            Column(
+                modifier = Modifier.padding(20.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Text("URL로 사운드 가져오기", style = MaterialTheme.typography.titleMedium)
+                Text(
+                    "직접 오디오 파일(mp3/wav/ogg 등)을 가리키는 URL을 붙여넣으세요. 최대 20MB.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                OutlinedTextField(
+                    value = url,
+                    onValueChange = { url = it; error = null },
+                    label = { Text("URL") },
+                    placeholder = { Text("https://...") },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    enabled = !downloading
+                )
+                if (error != null) {
+                    Text(
+                        error!!,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error
+                    )
+                }
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    TextButton(
+                        onClick = onDismiss,
+                        enabled = !downloading,
+                        modifier = Modifier.weight(1f)
+                    ) { Text("취소") }
+                    Button(
+                        onClick = {
+                            downloading = true
+                            error = null
+                            scope.launch {
+                                val result = SoundDownloader.downloadFromUrl(context, url)
+                                downloading = false
+                                if (result.fileUri != null) {
+                                    onImported(result.fileUri, result.displayName ?: "사운드")
+                                } else {
+                                    error = result.error ?: "알 수 없는 오류"
+                                }
+                            }
+                        },
+                        enabled = !downloading && url.isNotBlank(),
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        if (downloading) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(18.dp),
+                                strokeWidth = 2.dp,
+                                color = MaterialTheme.colorScheme.onPrimary
+                            )
+                        } else {
+                            Text("다운로드")
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
