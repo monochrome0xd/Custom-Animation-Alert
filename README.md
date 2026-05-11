@@ -61,6 +61,11 @@
 
 ### 사운드
 - **사용자 파일 업로드**: SAF로 오디오 파일 선택
+- **URL로 가져오기**: 직접 오디오 파일(mp3/wav/ogg/m4a/aac/flac/opus) URL을 붙여넣어 다운로드
+  - 사이트 무관 — myinstants 등 어디든 직접 미디어 파일 URL이면 동작
+  - 안전장치: 20MB 크기 제한, 30초 read / 15초 connect 타임아웃, Content-Type 또는 확장자 검증
+  - 저장 위치: `filesDir/sounds/{uuid}.{ext}` (앱 내부 저장소, 앱 삭제 시 자동 정리)
+  - 페이지 URL(HTML)은 아직 자동 파싱 안 함 — 사이트에서 직접 미디어 URL 복사해야 함
 - **미설정 시**: 시스템 기본 알림음
 - **음량 슬라이더**: 0~100% (시스템 미디어 볼륨에 곱해지는 비율)
 - **AudioAttributes USAGE_MEDIA**: 폰의 미디어 볼륨키로 직접 조절 가능
@@ -129,6 +134,7 @@ app/src/main/
 │   ├── AlertNotificationListener.kt # NotificationListenerService — 매칭/필터링/쿨타임
 │   ├── OverlayService.kt            # SYSTEM_ALERT_WINDOW 오버레이 + 마블 물리
 │   ├── Rule.kt                      # 데이터 모델 (Rule, RuleStore, EntryModes)
+│   ├── SoundDownloader.kt           # URL → filesDir/sounds 다운로드 (HttpURLConnection)
 │   └── ui/theme/                    # Compose 테마 (Color, Type, Theme)
 ├── res/
 │   ├── raw/                         # Lottie JSON 애니메이션
@@ -143,6 +149,7 @@ app/src/main/
 ### `AndroidManifest.xml` 핵심
 - `SYSTEM_ALERT_WINDOW` (오버레이)
 - `WAKE_LOCK` + `DISABLE_KEYGUARD` (화면 깨우기)
+- `INTERNET` (URL로 사운드 다운로드)
 - `QUERY_ALL_PACKAGES` (앱 목록 조회 — Play Store 출시 시 정당화 필요)
 - `BIND_NOTIFICATION_LISTENER_SERVICE` (`AlertNotificationListener` 서비스)
 
