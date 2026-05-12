@@ -299,15 +299,15 @@ fun AppTheme.darkScheme(): ColorScheme = when (this) {
 object ThemeStore {
     private const val PREFS = "theme_prefs"
     private const val KEY = "selected_theme"
-    private const val DEFAULT = "CAFE_CREAM"
+    private const val DEFAULT = "NOTION_MONO"
 
-    var current by mutableStateOf(AppTheme.CAFE_CREAM)
+    var current by mutableStateOf(AppTheme.NOTION_MONO)
         private set
 
     fun init(context: Context) {
         val saved = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .getString(KEY, DEFAULT) ?: DEFAULT
-        current = runCatching { AppTheme.valueOf(saved) }.getOrDefault(AppTheme.CAFE_CREAM)
+        current = runCatching { AppTheme.valueOf(saved) }.getOrDefault(AppTheme.NOTION_MONO)
     }
 
     fun set(context: Context, theme: AppTheme) {

@@ -57,6 +57,7 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.ShoppingCart
 import androidx.compose.foundation.lazy.LazyColumn
@@ -726,8 +727,7 @@ fun RenameGroupDialog(
     }
 }
 
-private val PreviewBg = Color(0xFFE5DDD5)  // 카드 안 미니 폰 미리보기 배경 (웜 베이지)
-private val ToggleOn = Color(0xFF7C8F6D)   // 세이지 그린 — 토글 "켜짐" 점등 (골드 액센트와 구분)
+private val ToggleOn = Color(0xFF7C8F6D)   // 세이지 그린 — 토글 "켜짐" 점등 (액센트와 구분, 테마 무관)
 
 @OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
@@ -749,15 +749,38 @@ fun RuleCard(
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
     ) {
         Column {
-            // 9:16 휴대폰 화면 미리보기 — 마블 물리 + 우상단 ⋯ 메뉴
+            // 9:16 휴대폰 화면 미리보기 — 마블 물리 + 좌상단 ▶ 재생 + 우상단 ⋯ 메뉴(삭제)
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
                     .aspectRatio(9f / 16f)
                     .clip(RoundedCornerShape(topStart = 12.dp, topEnd = 12.dp))
-                    .background(PreviewBg)
+                    .background(MaterialTheme.colorScheme.surfaceVariant)
             ) {
                 MarblePreview(rule = rule)
+
+                // 좌상단: 클릭 즉시 재생
+                IconButton(
+                    onClick = {
+                        val intent = Intent(context, OverlayService::class.java)
+                        intent.putExtra("ruleId", rule.id)
+                        if (rule.mediaUri == null && rule.packageName != null) {
+                            intent.putExtra("sourcePackage", rule.packageName)
+                        }
+                        context.startService(intent)
+                    },
+                    modifier = Modifier
+                        .align(Alignment.TopStart)
+                        .size(24.dp)
+                ) {
+                    Icon(
+                        Icons.Filled.PlayArrow,
+                        contentDescription = "재생",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+
+                // 우상단: ⋯ 메뉴 (삭제)
                 Box(modifier = Modifier.align(Alignment.TopEnd)) {
                     IconButton(
                         onClick = { menuExpanded = true },
@@ -773,18 +796,6 @@ fun RuleCard(
                         expanded = menuExpanded,
                         onDismissRequest = { menuExpanded = false }
                     ) {
-                        DropdownMenuItem(
-                            text = { Text("재생") },
-                            onClick = {
-                                menuExpanded = false
-                                val intent = Intent(context, OverlayService::class.java)
-                                intent.putExtra("ruleId", rule.id)
-                                if (rule.mediaUri == null && rule.packageName != null) {
-                                    intent.putExtra("sourcePackage", rule.packageName)
-                                }
-                                context.startService(intent)
-                            }
-                        )
                         DropdownMenuItem(
                             text = { Text("삭제") },
                             onClick = {
@@ -1173,6 +1184,8 @@ fun RuleEditScreen(
     var showAppPicker by remember { mutableStateOf(false) }
     var showAdvanced by remember { mutableStateOf(false) }
     var showUrlImportDialog by remember { mutableStateOf(false) }
+    var analyzingLoudness by remember { mutableStateOf(false) }
+    val coroutineScope = rememberCoroutineScope()
 
     val mediaPicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.PickVisualMedia()
@@ -1215,7 +1228,14 @@ fun RuleEditScreen(
                 )
             } catch (_: Exception) {}
             val name = uri.lastPathSegment?.substringAfterLast('/') ?: "사운드"
-            rule = rule.copy(soundUri = uri.toString(), soundName = name)
+            rule = rule.copy(soundUri = uri.toString(), soundName = name, measuredLoudnessDb = null)
+            // 백그라운드에서 라우드니스 측정 → 끝나면 rule 업데이트
+            analyzingLoudness = true
+            coroutineScope.launch {
+                val measured = LoudnessAnalyzer.measureDbfs(context, uri)
+                rule = rule.copy(measuredLoudnessDb = measured)
+                analyzingLoudness = false
+            }
         }
     }
 
@@ -1413,13 +1433,31 @@ fun RuleEditScreen(
                 Button(onClick = { soundPicker.launch(arrayOf("audio/*")) }) { Text("사운드 선택") }
                 OutlinedButton(onClick = { showUrlImportDialog = true }) { Text("URL로 가져오기") }
             }
+            // 라우드니스 분석 상태
+            when {
+                analyzingLoudness -> Text(
+                    "분석 중…",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                rule.measuredLoudnessDb != null -> Text(
+                    "자동 정규화 적용 (원본 ${rule.measuredLoudnessDb!!.toInt()} dB → 목표 음량까지 자동 보정)",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                rule.soundUri != null -> Text(
+                    "정규화 불가 — 사운드를 다시 임포트하면 자동 분석됩니다",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error
+                )
+            }
         }
 
-        Text("음량: ${(rule.volume * 100).toInt()}%")
+        Text("목표 음량: ${rule.targetLoudnessDb.toInt()} dB")
         Slider(
-            value = rule.volume,
-            onValueChange = { rule = rule.copy(volume = it) },
-            valueRange = 0f..1f,
+            value = rule.targetLoudnessDb,
+            onValueChange = { rule = rule.copy(targetLoudnessDb = it) },
+            valueRange = -30f..-3f,
             modifier = Modifier.fillMaxWidth()
         )
 
@@ -1643,8 +1681,8 @@ fun RuleEditScreen(
     if (showUrlImportDialog) {
         SoundUrlImportDialog(
             onDismiss = { showUrlImportDialog = false },
-            onImported = { uri, name ->
-                rule = rule.copy(soundUri = uri, soundName = name)
+            onImported = { uri, name, measuredDb ->
+                rule = rule.copy(soundUri = uri, soundName = name, measuredLoudnessDb = measuredDb)
                 showUrlImportDialog = false
             }
         )
@@ -1654,7 +1692,7 @@ fun RuleEditScreen(
 @Composable
 fun SoundUrlImportDialog(
     onDismiss: () -> Unit,
-    onImported: (uri: String, name: String) -> Unit
+    onImported: (uri: String, name: String, measuredDb: Float?) -> Unit
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -1711,7 +1749,7 @@ fun SoundUrlImportDialog(
                                 val result = SoundDownloader.downloadFromUrl(context, url)
                                 downloading = false
                                 if (result.fileUri != null) {
-                                    onImported(result.fileUri, result.displayName ?: "사운드")
+                                    onImported(result.fileUri, result.displayName ?: "사운드", result.measuredLoudnessDb)
                                 } else {
                                     error = result.error ?: "알 수 없는 오류"
                                 }

@@ -60,14 +60,25 @@
 - **크기 슬라이더**: 미디어 50~600dp, 앱 아이콘 25~200dp + 랜덤 토글
 
 ### 사운드
-- **사용자 파일 업로드**: SAF로 오디오 파일 선택
+- **사용자 파일 업로드**: SAF로 오디오 파일 선택 — 임포트 직후 라우드니스 자동 분석 (백그라운드 코루틴, 1~3초)
 - **URL로 가져오기**: 직접 오디오 파일(mp3/wav/ogg/m4a/aac/flac/opus) URL 또는 사운드 페이지 URL을 붙여넣어 다운로드
   - 사이트 무관 — myinstants 등 어디든 직접 미디어 파일 URL이면 동작
-  - **HTML 페이지도 자동 처리** — 페이지 URL 받으면 본문에서 첫 mp3/오디오 URL 정규식 추출 후 재귀 다운로드 (allowHtmlParse 플래그로 무한 재귀 차단)
-  - 안전장치: 20MB 크기 제한, HTML 본문 2MB 제한, 30초 read / 15초 connect 타임아웃, Content-Type 또는 확장자 검증
+  - **HTML 페이지 자동 처리** — 4단계 폴백으로 mp3 URL 추출:
+    1. 절대 URL 정규식 매칭 (myinstants 케이스)
+    2. HTML 엔티티 디코드(`&q;`, `&amp;` 등) 후 재시도
+    3. 파일명만 추출 → 같은 도메인 흔한 경로 13개(`/audio/`, `/sounds/` ...) HEAD 프로빙 (soundbuttonsworld 케이스)
+    4. `<audio>`/`<source>` 태그 안 모든 URL 추출 → CDN의 `response-content-type` 같은 응답 덮어쓰기 쿼리 제거 후 HEAD 프로빙 (mewpot 케이스)
+  - 안전장치: 20MB 크기 제한, HTML 본문 2MB 제한, 30초 read / 15초 connect 타임아웃, 3초 프로빙 타임아웃
   - 저장 위치: `filesDir/sounds/{uuid}.{ext}` (앱 내부 저장소, 앱 삭제 시 자동 정리)
 - **미설정 시**: 시스템 기본 알림음
-- **음량 슬라이더**: 0~100% (시스템 미디어 볼륨에 곱해지는 비율)
+- **자동 라우드니스 정규화** — 임포트 시 RMS dBFS 측정, 재생 시 목표 음량까지 자동 보정
+  - 측정: `LoudnessAnalyzer` (MediaExtractor + MediaCodec으로 PCM 디코딩 후 RMS 계산, 최대 60초 분석)
+  - 재생: `target - measured = gain`
+    - gain ≤ 0 → MediaPlayer.setVolume으로 감쇠
+    - gain > 0 → setVolume(1.0) + `LoudnessEnhancer` AudioEffect로 부스트 (최대 +24 dB)
+  - 결과: 큰 파일이든 작은 파일이든 슬라이더 값 근처로 수렴
+  - 기존 규칙(measuredLoudnessDb == null) → 폴백: targetLoudnessDb를 그대로 감쇠로 사용 (재임포트하면 분석됨)
+- **음량 슬라이더**: 목표 음량(dBFS), 범위 -30 dB ~ -3 dB, 기본 -14 dB
 - **AudioAttributes USAGE_MEDIA**: 폰의 미디어 볼륨키로 직접 조절 가능
 - **모드 정책 분리** (체크박스): 진동 모드 재생 / 무음 모드 재생
 - **동영상 사운드 사용 토글**: ON이면 동영상 음원 사용 (사운드 선택 UI 자동 숨김)
@@ -105,11 +116,16 @@
 - **홈 탭 (규칙 목록)**:
   - 그룹별 가로 스크롤 (3.n 카드 peek 효과)
   - 그룹 간 세로 스크롤 (Netflix 스타일)
-  - 9:16 카드 (휴대폰 화면 미리보기)
+  - 9:16 카드 (휴대폰 화면 미리보기) — 배경은 현재 테마의 `surfaceVariant` (테마 따라 변경됨)
   - 카드 안에서 마블 물리 시뮬레이션 (2.5초마다 반복)
+  - 카드 좌상단 ▶ 재생 버튼 (클릭 즉시 OverlayService 발동)
   - 카드 우상단 ⋯ 메뉴 (삭제)
-  - 토글: 점등형 동그라미 (Lottie 체크마크)
+  - 토글: 점등형 동그라미 (Lottie 체크마크, 세이지 그린 — 테마 무관 공통)
   - 키워드/이름 길면 마키 스크롤
+- **설정 탭**:
+  - 권한 배너 (알림 접근 / 오버레이)
+  - **테마 선택** (라디오 + 4색 미리보기 스와치, 5개 프리셋)
+  - 앱 정보
 - **그룹 헤더**: 양 끝 spread, 편집(✏)/추가(+) 원형 버튼
 - **앱 선택 다이얼로그**: 
   - 모든 설치된 앱 (시스템 앱 토글로 필터)
@@ -119,8 +135,8 @@
 - **뒤로가기**: BackHandler로 편집 화면 → 목록
 
 ### 마터리얼 디자인 / 테마
-- **5개 프리셋 테마** — 설정 탭에서 사용자가 선택, SharedPreferences에 저장
-  - **Notion Mono** — 차콜 + 오프화이트 + 블루 액센트 (원래 디자인, Notion/Linear 스타일)
+- **5개 프리셋 테마** — 설정 탭에서 사용자가 선택, SharedPreferences에 저장. 기본값 **Notion Mono**.
+  - **Notion Mono** (기본) — 차콜 + 오프화이트 + 블루 액센트 (Notion/Linear 스타일)
   - **Café Cream** — 아이보리/베이지 + 머스타드 골드 (웜 톤, 빈티지)
   - **Forest** — 세이지/포레스트 그린 (자연, 차분)
   - **Lavender** — 라벤더 + 딥 퍼플 (소프트, 드리미)
@@ -141,7 +157,8 @@ app/src/main/
 │   ├── AlertNotificationListener.kt # NotificationListenerService — 매칭/필터링/쿨타임
 │   ├── OverlayService.kt            # SYSTEM_ALERT_WINDOW 오버레이 + 마블 물리
 │   ├── Rule.kt                      # 데이터 모델 (Rule, RuleStore, EntryModes)
-│   ├── SoundDownloader.kt           # URL → filesDir/sounds 다운로드 (HttpURLConnection + HTML 파싱 폴백)
+│   ├── SoundDownloader.kt           # URL → filesDir/sounds 다운로드 (HttpURLConnection + 4단계 HTML 파싱 폴백)
+│   ├── LoudnessAnalyzer.kt          # 오디오 파일 RMS dBFS 측정 (MediaExtractor + MediaCodec)
 │   └── ui/theme/
 │       ├── Theme.kt                 # MaterialTheme 래퍼 (ThemeStore 읽음)
 │       ├── Themes.kt                # AppTheme enum (5종) + ColorScheme 매핑 + ThemeStore

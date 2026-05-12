@@ -34,7 +34,8 @@ data class Rule(
 
     val soundUri: String? = null,
     val soundName: String? = null,
-    val volume: Float = 1.0f,
+    val targetLoudnessDb: Float = -14f,  // 재생 시 목표 음량 (dBFS), 모든 사운드를 이 레벨에 맞춤
+    val measuredLoudnessDb: Float? = null,  // 임포트 시 측정된 파일의 RMS dBFS (null이면 정규화 안 됨, 폴백 모드)
     val playInVibrate: Boolean = true,
     val playInSilent: Boolean = false,
 
@@ -84,7 +85,8 @@ data class Rule(
         put("appIconSizeRandom", appIconSizeRandom)
         put("soundUri", soundUri ?: JSONObject.NULL)
         put("soundName", soundName ?: JSONObject.NULL)
-        put("volume", volume.toDouble())
+        put("targetLoudnessDb", targetLoudnessDb.toDouble())
+        put("measuredLoudnessDb", measuredLoudnessDb?.toDouble() ?: JSONObject.NULL)
         put("playInVibrate", playInVibrate)
         put("playInSilent", playInSilent)
         put("entryAnimation", entryAnimation)
@@ -146,7 +148,17 @@ data class Rule(
             appIconSizeRandom = obj.optBoolean("appIconSizeRandom", false),
             soundUri = if (obj.isNull("soundUri")) null else obj.optString("soundUri", null),
             soundName = if (obj.isNull("soundName")) null else obj.optString("soundName", null),
-            volume = obj.optDouble("volume", 1.0).toFloat(),
+            targetLoudnessDb = if (obj.has("targetLoudnessDb")) {
+                obj.optDouble("targetLoudnessDb", -14.0).toFloat()
+            } else {
+                // 레거시 마이그레이션: 기존 volume(0..1) → dB
+                val legacyVolume = obj.optDouble("volume", 1.0)
+                if (legacyVolume <= 0.0001) -30f
+                else (20.0 * kotlin.math.log10(legacyVolume)).toFloat().coerceIn(-30f, 0f)
+            },
+            measuredLoudnessDb = if (obj.has("measuredLoudnessDb") && !obj.isNull("measuredLoudnessDb")) {
+                obj.optDouble("measuredLoudnessDb").toFloat()
+            } else null,
             playInVibrate = obj.optBoolean("playInVibrate", false),
             playInSilent = obj.optBoolean("playInSilent", false),
             entryAnimation = obj.optBoolean("entryAnimation", true),
@@ -241,7 +253,12 @@ object RuleStore {
             appIconSizeRandom = v1.getBoolean("appIconSizeRandom", false),
             soundUri = v1.getString("soundUri", null),
             soundName = v1.getString("soundName", null),
-            volume = v1.getFloat("volume", 1f),
+            targetLoudnessDb = run {
+                val v = v1.getFloat("volume", 1f).toDouble()
+                if (v <= 0.0001) -30f
+                else (20.0 * kotlin.math.log10(v)).toFloat().coerceIn(-30f, 0f)
+            },
+            measuredLoudnessDb = null,
             playInVibrate = v1.getBoolean("playInVibrate", false),
             playInSilent = v1.getBoolean("playInSilent", false),
             entryAnimation = v1.getBoolean("entryAnimation", true),

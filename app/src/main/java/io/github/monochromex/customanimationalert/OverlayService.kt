@@ -46,6 +46,7 @@ class OverlayService : Service() {
         var mediaPlayer: MediaPlayer? = null
         var videoMediaPlayer: MediaPlayer? = null  // VideoView 내부 mp 참조 (페이드아웃용)
         var videoView: VideoView? = null
+        var loudnessEnhancer: android.media.audiofx.LoudnessEnhancer? = null  // 부스트용 AudioEffect
         var dismissRunnable: Runnable? = null
         var velocityTracker: VelocityTracker? = null
         var currentAnimator: Animator? = null
@@ -69,6 +70,7 @@ class OverlayService : Service() {
                     windowManager?.removeView(v)
                 }
             } catch (_: Exception) {}
+            try { loudnessEnhancer?.release() } catch (_: Exception) {}
             try { mediaPlayer?.release() } catch (_: Exception) {}
             try { velocityTracker?.recycle() } catch (_: Exception) {}
             try { if (wakeLock?.isHeld == true) wakeLock?.release() } catch (_: Exception) {}
@@ -76,6 +78,7 @@ class OverlayService : Service() {
             videoView = null
             mediaPlayer = null
             videoMediaPlayer = null
+            loudnessEnhancer = null
             velocityTracker = null
             currentAnimator = null
             spinAnimator = null
@@ -852,7 +855,16 @@ class OverlayService : Service() {
         if (mp == null && vmp == null) return
 
         val muteVideo = !rule.useVideoSound || shouldSkipSound(rule)
-        val mpBase = rule.volume
+        // 재생 시점의 setVolume 값을 그대로 페이드 시작점으로 사용.
+        // gain <= 0이면 감쇠 스케일, gain > 0이면 1.0 (부스트는 LoudnessEnhancer 쪽).
+        val gainDb = if (rule.measuredLoudnessDb != null) {
+            rule.targetLoudnessDb - rule.measuredLoudnessDb!!
+        } else {
+            rule.targetLoudnessDb
+        }
+        val mpBase = if (gainDb <= 0f) {
+            Math.pow(10.0, gainDb.toDouble() / 20.0).toFloat().coerceIn(0f, 1f)
+        } else 1f
         val vmpBase = if (muteVideo) 0f else 1f
 
         val animator = ValueAnimator.ofFloat(1f, 0f).apply {
@@ -926,10 +938,47 @@ class OverlayService : Service() {
             mp.setAudioAttributes(
                 AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_MEDIA).build()
             )
-            mp.setOnCompletionListener { it.release() }
-            mp.setOnErrorListener { player, _, _ -> player.release(); true }
+            mp.setOnCompletionListener {
+                try { instance.loudnessEnhancer?.release() } catch (_: Exception) {}
+                instance.loudnessEnhancer = null
+                it.release()
+            }
+            mp.setOnErrorListener { player, _, _ ->
+                try { instance.loudnessEnhancer?.release() } catch (_: Exception) {}
+                instance.loudnessEnhancer = null
+                player.release()
+                true
+            }
             mp.prepare()
-            mp.setVolume(rule.volume, rule.volume)
+
+            // 정규화 게인 계산:
+            //   measured(원본 음량) → target(목표 음량) 차이만큼 보정
+            //   measured == null이면 폴백: targetLoudnessDb를 그대로 감쇠로 사용
+            val gainDb = if (rule.measuredLoudnessDb != null) {
+                rule.targetLoudnessDb - rule.measuredLoudnessDb!!
+            } else {
+                rule.targetLoudnessDb
+            }
+
+            if (gainDb <= 0f) {
+                // 감쇠만: MediaPlayer.setVolume (0..1)
+                val scale = Math.pow(10.0, gainDb.toDouble() / 20.0).toFloat().coerceIn(0f, 1f)
+                mp.setVolume(scale, scale)
+            } else {
+                // 부스트: setVolume(1.0) + LoudnessEnhancer
+                mp.setVolume(1f, 1f)
+                try {
+                    val enhancer = android.media.audiofx.LoudnessEnhancer(mp.audioSessionId)
+                    // 1 dB = 100 mB. 안전한 부스트 한계 ~24 dB (그 이상은 클리핑 위험)
+                    val mb = (gainDb * 100f).toInt().coerceIn(0, 2400)
+                    enhancer.setTargetGain(mb)
+                    enhancer.enabled = true
+                    instance.loudnessEnhancer = enhancer
+                } catch (e: Exception) {
+                    Log.w("OverlayService", "LoudnessEnhancer 적용 실패 — 부스트 없이 진행", e)
+                }
+            }
+
             mp.start()
             instance.mediaPlayer = mp
             mp.duration

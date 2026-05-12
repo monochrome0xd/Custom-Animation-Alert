@@ -39,9 +39,20 @@ object SoundDownloader {
         "/api/audio/", "/api/file/", "/api/sound/"
     )
 
+    // <audio>/<source> 태그 (확장자 없는 CDN URL 케이스 — mewpot 등)
+    private val AUDIO_TAG_REGEX = Regex(
+        """<(?:audio|source)\b[^>]*>""",
+        RegexOption.IGNORE_CASE
+    )
+    private val URL_IN_ATTR_REGEX = Regex(
+        """[\w-]+\s*=\s*["'](https?://[^"'<>\s]+)["']""",
+        RegexOption.IGNORE_CASE
+    )
+
     data class Result(
         val fileUri: String? = null,
         val displayName: String? = null,
+        val measuredLoudnessDb: Float? = null,
         val error: String? = null
     )
 
@@ -118,6 +129,22 @@ object SoundDownloader {
                     }
                 }
 
+                // 4단계: <audio>/<source> 태그 안의 모든 URL을 HEAD 프로빙
+                // (확장자 없는 CDN URL, 서명된 URL 등을 잡음 — mewpot 같은 케이스)
+                // CDN의 response-content-type 덮어쓰기 트릭은 미리 제거 후 프로빙.
+                val audioTagUrls = AUDIO_TAG_REGEX.findAll(decoded)
+                    .flatMap { tag -> URL_IN_ATTR_REGEX.findAll(tag.value).map { it.groupValues[1] } }
+                    .map { stripCdnDownloadOverrides(it) }
+                    .distinct()
+                    .toList()
+                Log.d(TAG, "HTML page → ${audioTagUrls.size} URLs in <audio>/<source> tags")
+                for (candidate in audioTagUrls) {
+                    if (probeIsAudio(candidate)) {
+                        Log.d(TAG, "HTML page → audio tag probe hit: $candidate")
+                        return@withContext downloadFromUrl(context, candidate, allowHtmlParse = false)
+                    }
+                }
+
                 return@withContext Result(error = "페이지에서 오디오 URL을 찾지 못함")
             }
 
@@ -157,9 +184,13 @@ object SoundDownloader {
                 ?.let { Uri.decode(it) }
                 ?: fallbackName
 
+            val fileUri = Uri.fromFile(outFile)
+            val measured = LoudnessAnalyzer.measureDbfs(context, fileUri)
+
             Result(
-                fileUri = Uri.fromFile(outFile).toString(),
-                displayName = displayName
+                fileUri = fileUri.toString(),
+                displayName = displayName,
+                measuredLoudnessDb = measured
             )
         } catch (e: Exception) {
             Log.e(TAG, "download failed: $trimmed", e)
@@ -203,6 +234,33 @@ object SoundDownloader {
         }
         // &amp;는 마지막에 (다른 엔티티 안에 들어있을 수 있어서)
         return result.replace("&amp;", "&")
+    }
+
+    /**
+     * S3/CloudFront 등 CDN의 응답 헤더 덮어쓰기 쿼리 파라미터 제거.
+     * mewpot 같은 사이트가 audio/mpeg 파일을 image/gif로 위장 응답하게 만드는 트릭을 무력화.
+     * 서명(token/hmac)은 path와 일부 파라미터만 보장하므로 이 파라미터들은 제거해도 응답 받아짐.
+     */
+    private fun stripCdnDownloadOverrides(urlStr: String): String {
+        return try {
+            val u = URL(urlStr)
+            val query = u.query ?: return urlStr
+            val cleaned = query.split('&')
+                .filter { kv ->
+                    val key = kv.substringBefore('=').lowercase()
+                    key != "response-content-type" &&
+                    key != "response-content-disposition" &&
+                    key != "response-cache-control" &&
+                    key != "response-expires"
+                }
+                .joinToString("&")
+            val portPart = if (u.port > 0 && u.port != u.defaultPort) ":${u.port}" else ""
+            val pathPart = u.path ?: ""
+            val queryPart = if (cleaned.isNotBlank()) "?$cleaned" else ""
+            "${u.protocol}://${u.host}$portPart$pathPart$queryPart"
+        } catch (_: Exception) {
+            urlStr
+        }
     }
 
     private fun probeIsAudio(urlStr: String): Boolean {
