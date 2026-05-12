@@ -665,8 +665,8 @@ fun RenameGroupDialog(
     }
 }
 
-private val PreviewBg = Color(0xFFE5DDD5)
-private val ToggleOn = Color(0xFF22C55E)
+private val PreviewBg = Color(0xFFE5DDD5)  // 카드 안 미니 폰 미리보기 배경 (웜 베이지)
+private val ToggleOn = Color(0xFF7C8F6D)   // 세이지 그린 — 토글 "켜짐" 점등 (골드 액센트와 구분)
 
 @OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
