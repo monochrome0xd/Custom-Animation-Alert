@@ -119,12 +119,16 @@
 - **뒤로가기**: BackHandler로 편집 화면 → 목록
 
 ### 마터리얼 디자인 / 테마
-- **웜 톤 미니멀**: 아이보리/베이지 + 머스타드 골드 액센트
-- **다크 모카 브라운 (`#3D2E1F`) 주 색상, 아이보리 (`#FAF6EE`) 배경, 크림 화이트 (`#FFFCF4`) 카드**
-- **머스타드 골드 (`#C9A86B`)** — 스위치/포인트 액센트
-- **세이지 그린 (`#7C8F6D`)** — 토글 "켜짐" 점등 (액센트와 시각적 구분)
-- **다크 모드**: 다크 초콜릿 (`#1F1810`) 배경 + 크림 텍스트 (웜 다크)
+- **5개 프리셋 테마** — 설정 탭에서 사용자가 선택, SharedPreferences에 저장
+  - **Notion Mono** — 차콜 + 오프화이트 + 블루 액센트 (원래 디자인, Notion/Linear 스타일)
+  - **Café Cream** — 아이보리/베이지 + 머스타드 골드 (웜 톤, 빈티지)
+  - **Forest** — 세이지/포레스트 그린 (자연, 차분)
+  - **Lavender** — 라벤더 + 딥 퍼플 (소프트, 드리미)
+  - **Sunset** — 피치/코랄 + 오렌지 (따뜻함, 에너지)
+- **각 테마는 라이트/다크 모두 정의** — 시스템 다크 모드 토글 따라감
+- **세이지 그린 (`#7C8F6D`)** 토글 점등은 모든 테마 공통 (액센트와 시각 구분)
 - **dynamicColor OFF** — 폰 배경화면 색에 영향 안 받음, 일관된 디자인
+- 구현: [`ui/theme/Themes.kt`](app/src/main/java/io/github/monochromex/customanimationalert/ui/theme/Themes.kt) — `AppTheme` enum + 라이트/다크 ColorScheme 매핑, `ThemeStore` (SharedPreferences + `mutableStateOf`)
 
 ---
 
@@ -137,8 +141,11 @@ app/src/main/
 │   ├── AlertNotificationListener.kt # NotificationListenerService — 매칭/필터링/쿨타임
 │   ├── OverlayService.kt            # SYSTEM_ALERT_WINDOW 오버레이 + 마블 물리
 │   ├── Rule.kt                      # 데이터 모델 (Rule, RuleStore, EntryModes)
-│   ├── SoundDownloader.kt           # URL → filesDir/sounds 다운로드 (HttpURLConnection)
-│   └── ui/theme/                    # Compose 테마 (Color, Type, Theme)
+│   ├── SoundDownloader.kt           # URL → filesDir/sounds 다운로드 (HttpURLConnection + HTML 파싱 폴백)
+│   └── ui/theme/
+│       ├── Theme.kt                 # MaterialTheme 래퍼 (ThemeStore 읽음)
+│       ├── Themes.kt                # AppTheme enum (5종) + ColorScheme 매핑 + ThemeStore
+│       └── Type.kt                  # Typography
 ├── res/
 │   ├── raw/                         # Lottie JSON 애니메이션
 │   │   ├── checkmark.json           # 토글 점등 애니

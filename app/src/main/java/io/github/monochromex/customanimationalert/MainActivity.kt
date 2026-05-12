@@ -116,7 +116,9 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
+import io.github.monochromex.customanimationalert.ui.theme.AppTheme
 import io.github.monochromex.customanimationalert.ui.theme.MyApplicationTheme
+import io.github.monochromex.customanimationalert.ui.theme.ThemeStore
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.delay
@@ -139,6 +141,7 @@ object RuleUpdateBus {
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        ThemeStore.init(applicationContext)
         enableEdgeToEdge()
         setContent {
             MyApplicationTheme {
@@ -425,9 +428,11 @@ fun MarketTab(modifier: Modifier = Modifier) {
 
 @Composable
 fun SettingsTab(modifier: Modifier = Modifier) {
+    val context = LocalContext.current
     Column(
         modifier = modifier
             .fillMaxSize()
+            .verticalScroll(rememberScrollState())
             .padding(24.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
@@ -437,18 +442,74 @@ fun SettingsTab(modifier: Modifier = Modifier) {
 
         HorizontalDivider()
 
+        Text("테마", style = MaterialTheme.typography.titleMedium)
+        Text(
+            "라이트/다크는 시스템 설정 따라감",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            AppTheme.entries.forEach { theme ->
+                ThemeOptionRow(
+                    theme = theme,
+                    selected = ThemeStore.current == theme,
+                    onClick = { ThemeStore.set(context, theme) }
+                )
+            }
+        }
+
+        HorizontalDivider()
+
         Text("앱 정보", style = MaterialTheme.typography.titleMedium)
         Text(
             "Custom Animation Alert · 버전 1.0",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
+    }
+}
 
-        Text(
-            "추가 예정: 테마(라이트/다크), 계정, 디바운스 시간 조절 등",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
+@Composable
+private fun ThemeOptionRow(
+    theme: AppTheme,
+    selected: Boolean,
+    onClick: () -> Unit
+) {
+    Surface(
+        onClick = onClick,
+        shape = RoundedCornerShape(12.dp),
+        color = if (selected) MaterialTheme.colorScheme.tertiaryContainer
+                else MaterialTheme.colorScheme.surface,
+        border = BorderStroke(
+            1.dp,
+            if (selected) MaterialTheme.colorScheme.tertiary
+            else MaterialTheme.colorScheme.outline
+        ),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp)
+        ) {
+            RadioButton(selected = selected, onClick = onClick)
+            Spacer(modifier = Modifier.width(8.dp))
+            Text(
+                theme.displayName,
+                style = MaterialTheme.typography.bodyLarge,
+                modifier = Modifier.weight(1f)
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                theme.previewSwatches().forEach { swatch ->
+                    Box(
+                        modifier = Modifier
+                            .size(18.dp)
+                            .clip(CircleShape)
+                            .background(swatch)
+                            .border(1.dp, MaterialTheme.colorScheme.outline, CircleShape)
+                    )
+                }
+            }
+        }
     }
 }
 
