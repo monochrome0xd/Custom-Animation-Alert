@@ -1613,7 +1613,7 @@ fun SoundUrlImportDialog(
             ) {
                 Text("URL로 사운드 가져오기", style = MaterialTheme.typography.titleMedium)
                 Text(
-                    "직접 오디오 파일(mp3/wav/ogg 등)을 가리키는 URL을 붙여넣으세요. 최대 20MB.",
+                    "오디오 파일 URL 또는 사운드 페이지 URL(myinstants 등)을 붙여넣으세요. 최대 20MB.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )

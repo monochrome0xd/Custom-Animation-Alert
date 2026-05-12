@@ -13,9 +13,14 @@ import java.util.UUID
 object SoundDownloader {
     private const val TAG = "SoundDownloader"
     private const val MAX_SIZE_BYTES = 20L * 1024 * 1024
+    private const val MAX_HTML_BYTES = 2L * 1024 * 1024
     private const val CONNECT_TIMEOUT_MS = 15_000
     private const val READ_TIMEOUT_MS = 30_000
     private val KNOWN_AUDIO_EXTS = setOf("mp3", "wav", "ogg", "m4a", "aac", "flac", "opus")
+    private val AUDIO_URL_REGEX = Regex(
+        """https?://[^"\s'<>\\]+?\.(mp3|wav|ogg|m4a|aac|flac|opus)(?:\?[^"\s'<>\\]*)?""",
+        RegexOption.IGNORE_CASE
+    )
 
     data class Result(
         val fileUri: String? = null,
@@ -23,7 +28,11 @@ object SoundDownloader {
         val error: String? = null
     )
 
-    suspend fun downloadFromUrl(context: Context, urlStr: String): Result = withContext(Dispatchers.IO) {
+    suspend fun downloadFromUrl(
+        context: Context,
+        urlStr: String,
+        allowHtmlParse: Boolean = true
+    ): Result = withContext(Dispatchers.IO) {
         val trimmed = urlStr.trim()
         if (trimmed.isBlank()) return@withContext Result(error = "URL이 비어있음")
         if (!trimmed.startsWith("https://") && !trimmed.startsWith("http://")) {
@@ -56,6 +65,19 @@ object SoundDownloader {
             val isAudioByContentType = contentType.startsWith("audio/") || contentType.startsWith("video/")
             val isAudioByExt = urlExt in KNOWN_AUDIO_EXTS
             val isOctetStream = contentType.startsWith("application/octet-stream")
+            val isHtml = contentType.startsWith("text/html") || contentType.startsWith("application/xhtml")
+
+            // HTML 페이지면 본문에서 mp3 URL 추출 후 재귀 다운로드
+            if (isHtml && allowHtmlParse) {
+                val html = readBodyAsString(conn, MAX_HTML_BYTES)
+                conn.disconnect()
+                conn = null
+                val match = AUDIO_URL_REGEX.find(html)
+                    ?: return@withContext Result(error = "페이지에서 오디오 URL을 찾지 못함")
+                Log.d(TAG, "HTML page → extracted: ${match.value}")
+                return@withContext downloadFromUrl(context, match.value, allowHtmlParse = false)
+            }
+
             if (!isAudioByContentType && !isAudioByExt && !isOctetStream) {
                 return@withContext Result(error = "오디오 파일이 아닌 듯 (Content-Type=$contentType)")
             }
@@ -101,6 +123,24 @@ object SoundDownloader {
             Result(error = "다운로드 실패: ${e.message ?: e.javaClass.simpleName}")
         } finally {
             conn?.disconnect()
+        }
+    }
+
+    private fun readBodyAsString(conn: HttpURLConnection, maxBytes: Long): String {
+        val charset = conn.contentEncoding?.takeIf { it.isNotBlank() } ?: "UTF-8"
+        return conn.inputStream.use { input ->
+            val out = java.io.ByteArrayOutputStream()
+            val buf = ByteArray(8 * 1024)
+            var total = 0L
+            while (true) {
+                val read = input.read(buf)
+                if (read == -1) break
+                total += read
+                if (total > maxBytes) break
+                out.write(buf, 0, read)
+            }
+            try { String(out.toByteArray(), charset(charset)) }
+            catch (_: Exception) { String(out.toByteArray(), Charsets.UTF_8) }
         }
     }
 }

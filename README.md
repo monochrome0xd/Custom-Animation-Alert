@@ -61,11 +61,11 @@
 
 ### 사운드
 - **사용자 파일 업로드**: SAF로 오디오 파일 선택
-- **URL로 가져오기**: 직접 오디오 파일(mp3/wav/ogg/m4a/aac/flac/opus) URL을 붙여넣어 다운로드
+- **URL로 가져오기**: 직접 오디오 파일(mp3/wav/ogg/m4a/aac/flac/opus) URL 또는 사운드 페이지 URL을 붙여넣어 다운로드
   - 사이트 무관 — myinstants 등 어디든 직접 미디어 파일 URL이면 동작
-  - 안전장치: 20MB 크기 제한, 30초 read / 15초 connect 타임아웃, Content-Type 또는 확장자 검증
+  - **HTML 페이지도 자동 처리** — 페이지 URL 받으면 본문에서 첫 mp3/오디오 URL 정규식 추출 후 재귀 다운로드 (allowHtmlParse 플래그로 무한 재귀 차단)
+  - 안전장치: 20MB 크기 제한, HTML 본문 2MB 제한, 30초 read / 15초 connect 타임아웃, Content-Type 또는 확장자 검증
   - 저장 위치: `filesDir/sounds/{uuid}.{ext}` (앱 내부 저장소, 앱 삭제 시 자동 정리)
-  - 페이지 URL(HTML)은 아직 자동 파싱 안 함 — 사이트에서 직접 미디어 URL 복사해야 함
 - **미설정 시**: 시스템 기본 알림음
 - **음량 슬라이더**: 0~100% (시스템 미디어 볼륨에 곱해지는 비율)
 - **AudioAttributes USAGE_MEDIA**: 폰의 미디어 볼륨키로 직접 조절 가능
