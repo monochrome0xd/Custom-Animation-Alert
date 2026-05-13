@@ -106,6 +106,7 @@ import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.NestedScrollSource
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLifecycleOwner
@@ -113,6 +114,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
 import androidx.lifecycle.Lifecycle
@@ -532,6 +534,7 @@ fun RuleListScreen(
     }
     var expandedGroups by remember { mutableStateOf(grouped.keys.toSet()) }
     var renamingGroup by remember { mutableStateOf<String?>(null) }
+    var showAddGroupDialog by remember { mutableStateOf(false) }
 
     // 진입 시 헤더(타이틀+버튼)는 살짝 스크롤된 상태로 시작 → 첫 그룹부터 보이게
     val listState = rememberLazyListState(initialFirstVisibleItemIndex = 1)
@@ -556,8 +559,8 @@ fun RuleListScreen(
                 )
                 CircleIconButton(
                     icon = Icons.Filled.Add,
-                    contentDescription = "새 규칙",
-                    onClick = { onAdd("기본") },
+                    contentDescription = "새 그룹",
+                    onClick = { showAddGroupDialog = true },
                     filled = true,
                     size = 44.dp
                 )
@@ -623,6 +626,67 @@ fun RuleListScreen(
                 renamingGroup = null
             }
         )
+    }
+
+    if (showAddGroupDialog) {
+        AddGroupDialog(
+            existingGroupNames = grouped.keys,
+            onDismiss = { showAddGroupDialog = false },
+            onConfirm = { name ->
+                onAdd(name)
+                showAddGroupDialog = false
+            }
+        )
+    }
+}
+
+@Composable
+fun AddGroupDialog(
+    existingGroupNames: Set<String>,
+    onDismiss: () -> Unit,
+    onConfirm: (String) -> Unit
+) {
+    var name by remember { mutableStateOf("") }
+    val trimmed = name.trim()
+    val isDuplicate = trimmed in existingGroupNames
+    val canConfirm = trimmed.isNotBlank() && !isDuplicate
+
+    Dialog(onDismissRequest = onDismiss) {
+        Surface(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(16.dp)
+        ) {
+            Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text("새 그룹 추가", style = MaterialTheme.typography.titleLarge)
+                Text(
+                    "그룹 이름을 입력하면 그 그룹에 첫 규칙이 만들어집니다.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                OutlinedTextField(
+                    value = name,
+                    onValueChange = { name = it },
+                    label = { Text("그룹 이름") },
+                    isError = isDuplicate,
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true
+                )
+                if (isDuplicate) {
+                    Text(
+                        "같은 이름의 그룹이 이미 있습니다",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error
+                    )
+                }
+                Row(horizontalArrangement = Arrangement.End, modifier = Modifier.fillMaxWidth()) {
+                    TextButton(onClick = onDismiss) { Text("취소") }
+                    TextButton(
+                        onClick = { onConfirm(trimmed) },
+                        enabled = canConfirm
+                    ) { Text("추가") }
+                }
+            }
+        }
     }
 }
 
@@ -728,6 +792,22 @@ fun RenameGroupDialog(
 }
 
 private val ToggleOn = Color(0xFF7C8F6D)   // 세이지 그린 — 토글 "켜짐" 점등 (액센트와 구분, 테마 무관)
+
+// 미디어/앱 모두 미설정 시 폴백으로 띄울 이모지 풀
+val FALLBACK_EMOJIS = listOf(
+    "❤️", "💕", "💖", "💘",
+    "⭐", "✨", "🌟", "💫",
+    "⚡", "🔥", "💥", "🎉",
+    "🔔", "🚨", "📢", "📣",
+    "👀", "👋", "🙌", "👏",
+    "🐱", "🐶", "🐰", "🦊",
+    "🍀", "🌸", "🌈", "☀️",
+    "🎵", "🎶", "🎯", "💡"
+)
+
+/** rule.id 기반 결정적 이모지 — 같은 규칙은 항상 같은 이모지 (미리보기와 실제 재생 일치) */
+fun fallbackEmojiFor(ruleId: String): String =
+    FALLBACK_EMOJIS[abs(ruleId.hashCode()) % FALLBACK_EMOJIS.size]
 
 @OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
@@ -967,10 +1047,11 @@ fun MediaContent(rule: Rule, sizeDp: Dp, modifier: Modifier = Modifier) {
             )
         }
         else -> {
+            // 미디어/앱 모두 미설정 → 랜덤 이모지 폴백 (rule.id 기반 결정적)
             Box(modifier = modifier.size(sizeDp), contentAlignment = Alignment.Center) {
                 Text(
-                    "?",
-                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
+                    fallbackEmojiFor(rule.id),
+                    fontSize = (sizeDp.value * 0.7f).sp
                 )
             }
         }
@@ -982,6 +1063,7 @@ fun MediaContent(rule: Rule, sizeDp: Dp, modifier: Modifier = Modifier) {
 @Composable
 fun MarblePreview(rule: Rule) {
     val density = LocalDensity.current
+    val configuration = LocalConfiguration.current
     val isAppIcon = rule.mediaUri == null && rule.packageName != null
 
     BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
@@ -989,18 +1071,18 @@ fun MarblePreview(rule: Rule) {
         val boxHeightPx = with(density) { maxHeight.toPx() }
         val cardWidthDp = maxWidth.value
 
-        // 실제 폰 화면(360dp 기준) 대비 카드 폭에 비례하여 미디어 크기 축소.
-        // 마블이 튕길 공간 확보 위해 카드 폭의 60% 이내로 캡.
-        val phoneRefWidthDp = 360f
+        // 카드를 "작은 휴대폰 화면"으로 취급. 실제 디바이스 폭(dp)과 카드 폭의 비율로 스케일.
+        // 미디어가 카드보다 크면 부모 Box의 clip(RoundedCornerShape)이 자동으로 잘라줌.
+        val phoneRefWidthDp = configuration.screenWidthDp.toFloat().coerceAtLeast(1f)
         val scaleFactor = cardWidthDp / phoneRefWidthDp
-        val maxAllowedDp = cardWidthDp * 0.6f
         val sourceDp = remember(rule.id, rule.mediaSize, rule.mediaSizeRandom, rule.appIconSize, rule.appIconSizeRandom, isAppIcon) {
             if (isAppIcon)
                 effectiveValue(rule.appIconSize, rule.appIconSizeRandom, 50f, 200f)
             else
                 effectiveValue(rule.mediaSize, rule.mediaSizeRandom, 50f, 600f)
         }
-        val sizeDp = (sourceDp * scaleFactor).coerceIn(10f, maxAllowedDp).dp
+        // 최소 10dp 보장 (0 사이즈 방지), 상한 캡 없음 — 큰 미디어는 카드 밖으로 넘쳐 클리핑됨
+        val sizeDp = (sourceDp * scaleFactor).coerceAtLeast(10f).dp
         val sizePx = with(density) { sizeDp.toPx() }
 
         var x by remember(rule.id) { mutableStateOf(boxWidthPx / 2f - sizePx / 2f) }
@@ -1067,8 +1149,9 @@ private suspend fun runMarbleSim(
     val bouncePeak = effectiveValue(rule.bouncePeak, rule.bouncePeakRandom, 0.3f, 0.8f)
 
     val g = 9.81f * pxPerMeter * gravityScale
-    val groundY = boxHeight - sizePx - 4f
-    val maxX = boxWidth - sizePx
+    // 미디어가 카드보다 크면 음수가 나옴 → 0으로 클램프 (마블이 그 자리에 머무름)
+    val groundY = (boxHeight - sizePx - 4f).coerceAtLeast(0f)
+    val maxX = (boxWidth - sizePx).coerceAtLeast(0f)
     val minX = 0f
     val radius = sizePx / 2f
 
@@ -1309,7 +1392,8 @@ fun RuleEditScreen(
             rule.mediaUri != null && rule.mediaType == "image" -> {
                 AndroidView(
                     factory = { ctx -> ImageView(ctx).apply { scaleType = ImageView.ScaleType.FIT_CENTER } },
-                    update = { it.setImageURI(Uri.parse(rule.mediaUri)) },
+                    // when 분기 빠진 후에도 update가 한 번 더 fire되는 Compose race가 있어서 null-safe로
+                    update = { it.setImageURI(rule.mediaUri?.let(Uri::parse)) },
                     modifier = Modifier.fillMaxWidth().height(160.dp)
                 )
             }
@@ -1404,6 +1488,14 @@ fun RuleEditScreen(
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                 modifier = Modifier.weight(1f)
             )
+            OutlinedButton(
+                onClick = {
+                    val next = (rule.targetRotation + 90f) % 360f
+                    val normalized = if (next < 0f) next + 360f else next
+                    rule = rule.copy(targetRotation = normalized)
+                },
+                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
+            ) { Text("+90°", style = MaterialTheme.typography.bodySmall) }
         }
 
         HorizontalDivider()

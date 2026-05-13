@@ -254,7 +254,13 @@ class OverlayService : Service() {
                     return@run iv
                 } catch (e: Exception) { Log.e("OverlayService", "앱 아이콘 로드 실패", e) }
             }
-            TextView(this).apply { text = "HEART"; textSize = 100f }
+            // 미디어/앱 모두 없음 → 랜덤 이모지 폴백 (rule.id 기반 결정적)
+            hasMedia = true
+            TextView(this).apply {
+                text = fallbackEmojiFor(rule.id)
+                setTextSize(android.util.TypedValue.COMPLEX_UNIT_DIP, mediaSizeDp * 0.7f)
+                gravity = Gravity.CENTER
+            }
         }
 
         instance.view = view
