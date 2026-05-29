@@ -1,4 +1,4 @@
-package io.github.monochromex.customanimationalert.ui.theme
+package io.github.monochrome0xd.customanimationalert.ui.theme
 
 import android.content.Context
 import androidx.compose.material3.ColorScheme
@@ -18,7 +18,8 @@ enum class AppTheme(val displayName: String) {
     CAFE_CREAM("Café Cream"),
     FOREST("Forest"),
     LAVENDER("Lavender"),
-    SUNSET("Sunset");
+    SUNSET("Sunset"),
+    SAKURA("사쿠라");
 
     /** 미리보기용 대표 색 4개: primary, surface, tertiary(accent), outline */
     fun previewSwatches(): List<Color> = when (this) {
@@ -27,6 +28,7 @@ enum class AppTheme(val displayName: String) {
         FOREST      -> listOf(Color(0xFF2D3E2D), Color(0xFFFFFFFF), Color(0xFF5C8F4E), Color(0xFFD6E3CF))
         LAVENDER    -> listOf(Color(0xFF4A3B5C), Color(0xFFFFFFFF), Color(0xFF8B5CF6), Color(0xFFDDD3F0))
         SUNSET      -> listOf(Color(0xFF6B3E2F), Color(0xFFFFFFFF), Color(0xFFF97316), Color(0xFFF2D5C2))
+        SAKURA      -> listOf(Color(0xFFB94A6E), Color(0xFFFFF5F8), Color(0xFFF59AB8), Color(0xFFF5C9D8))
     }
 }
 
@@ -156,6 +158,32 @@ fun AppTheme.lightScheme(): ColorScheme = when (this) {
         onSurfaceVariant    = Color(0xFF8E6453),
         outline             = Color(0xFFE5C5AC),
         outlineVariant      = Color(0xFFF2DEC9),
+        error               = Color(0xFFB23A48),
+        onError             = Color(0xFFFFFFFF),
+        errorContainer      = Color(0xFFFCE4DC),
+        onErrorContainer    = Color(0xFF7B2E2E)
+    )
+    AppTheme.SAKURA -> lightColorScheme(
+        primary             = Color(0xFFB94A6E),
+        onPrimary           = Color(0xFFFFF5F8),
+        primaryContainer    = Color(0xFFFAD4E0),
+        onPrimaryContainer  = Color(0xFF6E1F3A),
+        secondary           = Color(0xFFC97A93),
+        onSecondary         = Color(0xFFFFFFFF),
+        secondaryContainer  = Color(0xFFFCE2EC),
+        onSecondaryContainer = Color(0xFF6E1F3A),
+        tertiary            = Color(0xFFF59AB8),
+        onTertiary          = Color(0xFFFFFFFF),
+        tertiaryContainer   = Color(0xFFFFDEE9),
+        onTertiaryContainer = Color(0xFF8A2B4F),
+        background          = Color(0xFFFFF5F8),
+        onBackground        = Color(0xFF4A1F2E),
+        surface             = Color(0xFFFFFAFC),
+        onSurface           = Color(0xFF4A1F2E),
+        surfaceVariant      = Color(0xFFFDEAF0),
+        onSurfaceVariant    = Color(0xFF8E5A6C),
+        outline             = Color(0xFFF5C9D8),
+        outlineVariant      = Color(0xFFFAE0E8),
         error               = Color(0xFFB23A48),
         onError             = Color(0xFFFFFFFF),
         errorContainer      = Color(0xFFFCE4DC),
@@ -294,25 +322,82 @@ fun AppTheme.darkScheme(): ColorScheme = when (this) {
         errorContainer      = Color(0xFF3D1F1F),
         onErrorContainer    = Color(0xFFF0A8A8)
     )
+    AppTheme.SAKURA -> darkColorScheme(
+        primary             = Color(0xFFFAD4E0),
+        onPrimary           = Color(0xFF2A0F1A),
+        primaryContainer    = Color(0xFF5C2941),
+        onPrimaryContainer  = Color(0xFFFAD4E0),
+        secondary           = Color(0xFFE0A6BC),
+        onSecondary         = Color(0xFF2A0F1A),
+        secondaryContainer  = Color(0xFF5C2941),
+        onSecondaryContainer = Color(0xFFFAD4E0),
+        tertiary            = Color(0xFFFAB8CC),
+        onTertiary          = Color(0xFF2A0F1A),
+        tertiaryContainer   = Color(0xFF7A2D4B),
+        onTertiaryContainer = Color(0xFFFFDEE9),
+        background          = Color(0xFF1F0D15),
+        onBackground        = Color(0xFFFAD4E0),
+        surface             = Color(0xFF2A0F1A),
+        onSurface           = Color(0xFFFAD4E0),
+        surfaceVariant      = Color(0xFF5C2941),
+        onSurfaceVariant    = Color(0xFFE0A6BC),
+        outline             = Color(0xFF7A3F58),
+        outlineVariant      = Color(0xFF5C2941),
+        error               = Color(0xFFE07585),
+        onError             = Color(0xFF1F0D15),
+        errorContainer      = Color(0xFF3D1F1F),
+        onErrorContainer    = Color(0xFFF0A8A8)
+    )
+}
+
+/** 라이트/다크 모드 강제 옵션 */
+enum class ThemeMode(val displayName: String) {
+    SYSTEM("시스템 설정"),
+    LIGHT("라이트"),
+    DARK("다크")
 }
 
 object ThemeStore {
     private const val PREFS = "theme_prefs"
     private const val KEY = "selected_theme"
+    private const val KEY_MODE = "theme_mode"
+    private const val KEY_ONBOARDED = "theme_onboarded"
     private const val DEFAULT = "NOTION_MONO"
 
     var current by mutableStateOf(AppTheme.NOTION_MONO)
         private set
 
+    var mode by mutableStateOf(ThemeMode.SYSTEM)
+        private set
+
+    /** 첫 실행 시 false → 테마 선택 다이얼로그 표시. 한 번 선택하면 true. */
+    var hasOnboarded by mutableStateOf(false)
+        private set
+
     fun init(context: Context) {
-        val saved = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .getString(KEY, DEFAULT) ?: DEFAULT
+        val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        val saved = prefs.getString(KEY, DEFAULT) ?: DEFAULT
         current = runCatching { AppTheme.valueOf(saved) }.getOrDefault(AppTheme.NOTION_MONO)
+        val savedMode = prefs.getString(KEY_MODE, ThemeMode.SYSTEM.name) ?: ThemeMode.SYSTEM.name
+        mode = runCatching { ThemeMode.valueOf(savedMode) }.getOrDefault(ThemeMode.SYSTEM)
+        hasOnboarded = prefs.getBoolean(KEY_ONBOARDED, false)
     }
 
     fun set(context: Context, theme: AppTheme) {
         current = theme
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .edit().putString(KEY, theme.name).apply()
+    }
+
+    fun setMode(context: Context, newMode: ThemeMode) {
+        mode = newMode
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .edit().putString(KEY_MODE, newMode.name).apply()
+    }
+
+    fun markOnboarded(context: Context) {
+        hasOnboarded = true
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .edit().putBoolean(KEY_ONBOARDED, true).apply()
     }
 }

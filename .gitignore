@@ -14,3 +14,15 @@
 .cxx
 local.properties
 .claude/
+
+# Firebase 설정 파일 — API 키 포함, 커밋 금지
+# 새 PC에서 빌드 시 Firebase Console에서 다시 다운로드 필요
+app/google-services.json
+
+# 빌드 로그
+build-output.log
+
+# 서명 키 — 절대 커밋 금지. 잃어버리면 Play Store 업데이트 영영 불가.
+keystore.properties
+*.jks
+*.keystore

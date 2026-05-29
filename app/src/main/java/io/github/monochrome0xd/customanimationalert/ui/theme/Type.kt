@@ -1,4 +1,4 @@
-package io.github.monochromex.customanimationalert.ui.theme
+package io.github.monochrome0xd.customanimationalert.ui.theme
 
 import androidx.compose.material3.Typography
 import androidx.compose.ui.text.TextStyle

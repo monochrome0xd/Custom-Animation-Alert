@@ -20,7 +20,7 @@
 - **데이터 저장**: SharedPreferences + JSONArray (다중 규칙 RuleStore)
 - **외부 라이브러리**: Lottie Compose (체크마크/마켓 아이콘/로딩 애니)
 - **테스트 폰**: Samsung Galaxy SM-S937N (S23+)
-- **패키지명**: `io.github.monochromex.customanimationalert`
+- **패키지명**: `io.github.monochrome0xd.customanimationalert`
 
 ---
 
@@ -144,7 +144,7 @@
 - **각 테마는 라이트/다크 모두 정의** — 시스템 다크 모드 토글 따라감
 - **세이지 그린 (`#7C8F6D`)** 토글 점등은 모든 테마 공통 (액센트와 시각 구분)
 - **dynamicColor OFF** — 폰 배경화면 색에 영향 안 받음, 일관된 디자인
-- 구현: [`ui/theme/Themes.kt`](app/src/main/java/io/github/monochromex/customanimationalert/ui/theme/Themes.kt) — `AppTheme` enum + 라이트/다크 ColorScheme 매핑, `ThemeStore` (SharedPreferences + `mutableStateOf`)
+- 구현: [`ui/theme/Themes.kt`](app/src/main/java/io/github/monochrome0xd/customanimationalert/ui/theme/Themes.kt) — `AppTheme` enum + 라이트/다크 ColorScheme 매핑, `ThemeStore` (SharedPreferences + `mutableStateOf`)
 
 ---
 
@@ -152,7 +152,7 @@
 
 ```
 app/src/main/
-├── java/io/github/monochromex/customanimationalert/
+├── java/io/github/monochrome0xd/customanimationalert/
 │   ├── MainActivity.kt              # Compose 메인 화면 + 모든 UI Composable
 │   ├── AlertNotificationListener.kt # NotificationListenerService — 매칭/필터링/쿨타임
 │   ├── OverlayService.kt            # SYSTEM_ALERT_WINDOW 오버레이 + 마블 물리

@@ -138,6 +138,6 @@ Play Console에 입력할 답변을 정리한 문서. 양식이 자주 바뀌므
 1. 양식 저장 후 "심사 시작" 버튼 누르기 (실제 심사는 출시 시점에 같이 진행)
 2. 개인정보처리방침 URL은 다음 입력:
    ```
-   https://monochrome-x.github.io/Custom-Animation-Alert/privacy-policy.html
+   https://monochrome0xd.github.io/Custom-Animation-Alert/privacy-policy.html
    ```
 3. 위 정책 페이지에 본 양식의 모든 항목이 일관되게 기술돼있어야 함 (이미 작성됨)

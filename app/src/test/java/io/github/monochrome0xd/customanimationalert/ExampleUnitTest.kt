@@ -1,4 +1,4 @@
-package io.github.monochromex.customanimationalert
+package io.github.monochrome0xd.customanimationalert
 
 import org.junit.Test
 

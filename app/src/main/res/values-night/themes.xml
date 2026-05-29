@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 다크 모드용. Compose가 그리기 전 잠깐 보이는 윈도우 배경이 흰색으로 깜박이는 것 방지. -->
+    <style name="Theme.MyApplication" parent="android:Theme.Material.NoActionBar" />
+</resources>

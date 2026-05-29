@@ -1,4 +1,4 @@
-package io.github.monochromex.customanimationalert
+package io.github.monochrome0xd.customanimationalert
 
 import android.app.Notification
 import android.content.Intent
@@ -46,7 +46,28 @@ class AlertNotificationListener : NotificationListenerService() {
             return
         }
 
-        val rules = RuleStore.loadAll(applicationContext).filter { it.enabled }
+        val nowMin = run {
+            val cal = java.util.Calendar.getInstance()
+            cal.get(java.util.Calendar.HOUR_OF_DAY) * 60 + cal.get(java.util.Calendar.MINUTE)
+        }
+        val rules = RuleStore.loadAll(applicationContext).filter { rule ->
+            if (!rule.enabled) return@filter false
+            // 시간대 제한
+            if (rule.scheduleEnabled) {
+                val s = rule.scheduleStartMin
+                val e = rule.scheduleEndMin
+                val inRange = when {
+                    s == e -> false
+                    s < e -> nowMin in s until e
+                    else -> nowMin >= s || nowMin < e
+                }
+                if (!inRange) {
+                    Log.d("AlertListener", "  ↳ '${rule.name}' 시간대 밖 (${nowMin}분) → 스킵")
+                    return@filter false
+                }
+            }
+            true
+        }
         if (rules.isEmpty()) {
             Log.d("AlertListener", "  ↳ 활성 규칙 없음")
             return
@@ -88,13 +109,14 @@ class AlertNotificationListener : NotificationListenerService() {
             return
         }
 
-        // 가장 구체적인 규칙 1개 + "같이 재생" 켠 다른 매칭 규칙 모두 발동
-        val primary = matchedAll.maxByOrNull { it.score }!!.rule
-        val toFire = mutableListOf(primary)
-        matchedAll.forEach { scored ->
-            if (scored.rule.id != primary.id && scored.rule.playAlongside) {
-                toFire.add(scored.rule)
-            }
+        // 함께 재생 로직:
+        // - 매칭된 규칙 중 하나라도 playAlongside=true면 → 매칭된 전체 규칙이 함께 발동
+        // - 모두 false면 → 가장 구체적인 규칙 1개만 발동
+        val anyAlongside = matchedAll.any { it.rule.playAlongside }
+        val toFire: List<Rule> = if (anyAlongside) {
+            matchedAll.map { it.rule }
+        } else {
+            listOf(matchedAll.maxByOrNull { it.score }!!.rule)
         }
 
         toFire.forEach { rule ->

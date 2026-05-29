@@ -1,4 +1,4 @@
-package io.github.monochromex.customanimationalert
+package io.github.monochrome0xd.customanimationalert
 
 import android.animation.Animator
 import android.animation.AnimatorListenerAdapter
@@ -93,7 +93,7 @@ class OverlayService : Service() {
     private val dismissHandler = Handler(Looper.getMainLooper())
     private var screenWidth = 0
     private var screenHeight = 0
-    private val maxInstances = 10
+    private val maxInstances = 20  // 절대 상한 (Rule.stackMaxCount는 1~20)
     // 위치 편집 모드용 오버레이 버튼들
     private var editSaveButtonView: View? = null
     private var editResetButtonView: View? = null
@@ -112,14 +112,43 @@ class OverlayService : Service() {
 
         val ruleId = intent?.getStringExtra("ruleId")
         val sourcePackage = intent?.getStringExtra("sourcePackage")
+        // ruleJson extra가 있으면 그대로 사용 (마켓 카드에서 즉시 재생 — RuleStore 거치지 않음)
+        val ruleJsonExtra = intent?.getStringExtra("ruleJson")
 
-        val rule = if (ruleId != null) RuleStore.find(this, ruleId) ?: Rule()
-        else RuleStore.loadAll(this).firstOrNull { it.enabled } ?: Rule()
+        val rawRule = when {
+            ruleJsonExtra != null -> try {
+                Rule.fromJson(org.json.JSONObject(ruleJsonExtra))
+            } catch (e: Exception) {
+                Log.e("OverlayService", "ruleJson 파싱 실패", e)
+                Rule()
+            }
+            ruleId != null -> RuleStore.find(this, ruleId) ?: Rule()
+            else -> RuleStore.loadAll(this).firstOrNull { it.enabled } ?: Rule()
+        }
+
+        // 가로모드 처리
+        val isLandscape = resources.configuration.orientation ==
+                android.content.res.Configuration.ORIENTATION_LANDSCAPE
+        val soundOnlyLandscape = isLandscape && !rawRule.disableInLandscape && rawRule.landscapeSoundOnly
+        val soundOnlyAlways = rawRule.soundOnly
+        val rule = if (isLandscape) {
+            if (rawRule.disableInLandscape) {
+                Log.d("OverlayService", "가로모드 — disableInLandscape=ON 이라 발동 안 함 (rule=${rawRule.name})")
+                return START_NOT_STICKY
+            }
+            when {
+                rawRule.landscapeAnimationOnly -> rawRule.copy(soundUri = null, useVideoSound = false)
+                rawRule.landscapeSoundOnly -> rawRule  // showOverlay 호출은 아래에서 스킵
+                else -> rawRule
+            }
+        } else rawRule
 
         if (!rule.stackOverlays) {
             instances.toList().forEach { it.cleanup(checkStopSelf = false) }
         } else {
-            while (instances.size >= maxInstances) {
+            // 규칙별 최대 중첩 개수 (1~20)에 도달하면 가장 오래된 것부터 제거
+            val cap = rule.stackMaxCount.coerceIn(1, maxInstances)
+            while (instances.size >= cap) {
                 instances.first().cleanup(checkStopSelf = false)
             }
         }
@@ -146,7 +175,12 @@ class OverlayService : Service() {
         }
 
         val soundDurationMs = playSound(instance, rule)
-        showOverlay(instance, rule, soundDurationMs, sourcePackage)
+        if (soundOnlyLandscape || soundOnlyAlways) {
+            // 사운드만 재생 — 오버레이 뷰 없이 사운드 종료 시 정리
+            scheduleDismiss(instance, soundDurationMs.coerceAtLeast(3000).toLong())
+        } else {
+            showOverlay(instance, rule, soundDurationMs, sourcePackage)
+        }
         return START_NOT_STICKY
     }
 
@@ -211,14 +245,33 @@ class OverlayService : Service() {
                     try {
                         val vv = VideoView(this)
                         vv.setVideoURI(uri)
+                        if (rule.mediaCircleCrop) applyCircleClip(vv)
                         isVideo = true
                         hasMedia = true
                         instance.videoView = vv
                         return@run vv
                     } catch (e: Exception) { Log.e("OverlayService", "동영상 로드 실패", e) }
+                } else if (mediaType == "lottie") {
+                    try {
+                        val lv = com.airbnb.lottie.LottieAnimationView(this).apply {
+                            // file:// 또는 content:// URI에서 JSON 읽기
+                            val jsonStr = contentResolver.openInputStream(uri)?.use { it.bufferedReader().readText() }
+                            if (jsonStr != null) {
+                                setAnimationFromJson(jsonStr, uri.toString())
+                                if (rule.mediaLoop) repeatCount = com.airbnb.lottie.LottieDrawable.INFINITE
+                                playAnimation()
+                            }
+                        }
+                        if (rule.mediaCircleCrop) applyCircleClip(lv)
+                        hasMedia = true
+                        return@run lv
+                    } catch (e: Exception) { Log.e("OverlayService", "Lottie 로드 실패", e) }
                 } else {
                     try {
-                        val iv = ImageView(this).apply { scaleType = ImageView.ScaleType.FIT_CENTER }
+                        val iv = ImageView(this).apply {
+                            scaleType = if (rule.mediaCircleCrop) ImageView.ScaleType.CENTER_CROP
+                                        else ImageView.ScaleType.FIT_CENTER
+                        }
                         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
                             val source = ImageDecoder.createSource(contentResolver, uri)
                             val drawable = ImageDecoder.decodeDrawable(source)
@@ -232,6 +285,7 @@ class OverlayService : Service() {
                                 drawable.start()
                             }
                         } else iv.setImageURI(uri)
+                        if (rule.mediaCircleCrop) applyCircleClip(iv)
                         if (iv.drawable != null) { hasMedia = true; return@run iv }
                     } catch (e: Exception) { Log.e("OverlayService", "이미지 로드 실패", e) }
                 }
@@ -304,7 +358,11 @@ class OverlayService : Service() {
             gravity = Gravity.TOP or Gravity.START
             // 마블 시작 X도 사용자 위치 기준 (랜덤 X 대신 centerX = 사용자 targetX)
             x = instance.centerX
-            y = if (rule.entryAnimation) screenHeight else instance.centerY
+            // directional/peek은 별도 시작 위치 사용, marble/drift는 화면 아래에서 진입
+            y = if (rule.entryAnimation &&
+                    rule.entryMode != "directional" &&
+                    rule.entryMode != "peek") screenHeight
+                else instance.centerY
         }
         instance.params = params
 
@@ -313,24 +371,33 @@ class OverlayService : Service() {
         }
 
         if (rule.entryAnimation) {
-            if (rule.entryMode == "marble") {
-                startMarbleEntry(instance, rule)
-            } else {
-                animateInstanceTo(instance, params.y, instance.centerY, 700, OvershootInterpolator(1.5f))
+            when (rule.entryMode) {
+                "marble" -> startMarbleEntry(instance, rule)
+                "drift" -> startDriftEntry(instance, rule)
+                "directional" -> startDirectionalEntry(instance, rule)
+                "peek" -> startPeekEntry(instance, rule)
+                else -> animateInstanceTo(instance, params.y, instance.centerY, 700, OvershootInterpolator(1.5f))
             }
         }
+
+        // animationDurationEnabled가 ON이면 사용자 설정 시간을 강제 종료 시점으로 사용
+        val userDurationMs = if (rule.animationDurationEnabled && rule.animationDurationSec > 0f)
+            (rule.animationDurationSec * 1000f).toLong() else 0L
 
         if (isVideo && view is VideoView) {
             view.setOnPreparedListener { mp ->
                 instance.videoMediaPlayer = mp
                 if (muteVideo) mp.setVolume(0f, 0f)
                 view.start()
-                val totalMs = max(mp.duration, soundDurationMs).coerceAtLeast(3000)
-                scheduleDismiss(instance, totalMs.toLong())
+                val baseMs = max(mp.duration, soundDurationMs).coerceAtLeast(3000).toLong()
+                val totalMs = if (userDurationMs > 0L) userDurationMs else baseMs
+                scheduleDismiss(instance, totalMs)
             }
             view.setOnErrorListener { _, _, _ -> instance.cleanup(); true }
         } else {
-            scheduleDismiss(instance, soundDurationMs.coerceAtLeast(3000).toLong())
+            val baseMs = soundDurationMs.coerceAtLeast(3000).toLong()
+            val totalMs = if (userDurationMs > 0L) userDurationMs else baseMs
+            scheduleDismiss(instance, totalMs)
         }
 
         if (rule.dragEnabled) attachTouchHandler(instance, rule)
@@ -353,6 +420,228 @@ class OverlayService : Service() {
         animator.start()
     }
 
+    /**
+     * 천천히 상승 (drift) 모드 — 직선 운동 + 선택적 벽/바닥/천장 충돌.
+     * 화면 가장자리(인셋 제외) 끝까지 닿도록 좌표 범위는 0..screen 전체 사용.
+     * ValueAnimator를 "ticker"로 사용. 사용자 터치 시 attachTouchHandler가 currentAnimator.cancel().
+     */
+    private fun startDriftEntry(instance: OverlayInstance, rule: Rule) {
+        val params = instance.params ?: return
+        val view = instance.view ?: return
+        val sizePx = instance.sizePx
+        val density = resources.displayMetrics.density
+        val targetSpeedPxs = rule.driftSpeed.coerceIn(50f, 400f) * density  // 슬라이더 상한과 동일
+
+        // 화면 가장자리까지 — 인셋 무시
+        val floor = (screenHeight - sizePx).toFloat().coerceAtLeast(0f)
+        val ceiling = 0f
+        val leftWall = 0f
+        val rightWall = (screenWidth - sizePx).toFloat().coerceAtLeast(0f)
+
+        // 시작 위치 랜덤 옵션 — 화면 가로 범위 내 무작위 X
+        var x = if (rule.driftRandomStartX) {
+            (Math.random() * (screenWidth - sizePx).coerceAtLeast(1)).toFloat()
+        } else params.x.toFloat()
+        var y = params.y.toFloat()  // 신규 진입은 screenHeight (화면 아래), 드래그 후 재개는 현재 위치
+        val angle = (-Math.PI / 2 + (Math.random() - 0.5) * (Math.PI / 3)).toFloat()
+        var ux = kotlin.math.cos(angle).toFloat()
+        var uy = kotlin.math.sin(angle).toFloat()
+        val rotateDir = if (Math.random() < 0.5) 1f else -1f
+        val startNanos = System.nanoTime()
+        var lastNanos = startNanos
+        val accelRampSec = 1.5f
+
+        val animator = ValueAnimator.ofFloat(0f, 1f).apply {
+            duration = Long.MAX_VALUE / 2  // 사실상 무한
+            interpolator = LinearInterpolator()
+            repeatCount = ValueAnimator.INFINITE
+        }
+        instance.currentAnimator = animator
+
+        animator.addUpdateListener {
+            if (instance.isCleanedUp) {
+                animator.cancel()
+                return@addUpdateListener
+            }
+            val now = System.nanoTime()
+            val dt = ((now - lastNanos) / 1_000_000_000f).coerceAtMost(0.05f)
+            lastNanos = now
+            val elapsed = (now - startNanos) / 1_000_000_000f
+
+            val speedScale = if (rule.driftAccelerate) {
+                (elapsed / accelRampSec).coerceAtMost(1f)
+            } else 1f
+            val curSpeed = targetSpeedPxs * speedScale
+            val vx = ux * curSpeed
+            val vy = uy * curSpeed
+
+            x += vx * dt
+            y += vy * dt
+
+            if (rule.driftBounceWalls) {
+                if (x < leftWall) { x = leftWall; ux = -ux }
+                else if (x > rightWall) { x = rightWall; ux = -ux }
+            }
+            if (rule.driftBounceCeiling && y < ceiling) { y = ceiling; uy = -uy }
+            if (rule.driftBounceFloor && y > floor) { y = floor; uy = -uy }
+
+            // 화면 완전 이탈 (모든 충돌 off + 진행 중) → 자동 정리
+            if (x < -sizePx * 2 || x > screenWidth + sizePx ||
+                y < -sizePx * 2 || y > screenHeight + sizePx
+            ) {
+                animator.cancel()
+                instance.cleanup()
+                return@addUpdateListener
+            }
+
+            params.x = x.toInt()
+            params.y = y.toInt()
+            try { windowManager?.updateViewLayout(view, params) }
+            catch (_: Exception) { animator.cancel(); return@addUpdateListener }
+            if (rule.driftRotate) {
+                view.rotation = (view.rotation + 30f * speedScale * dt) % 360f
+            }
+        }
+        animator.start()
+    }
+
+    /**
+     * 방향 이동(directional) — 사용자 위치에서 지정 각도 방향으로 직선 이동.
+     * 0°=오른쪽, 90°=아래, 180°=왼쪽, 270°=위 (화면 좌표계).
+     */
+    private fun startDirectionalEntry(instance: OverlayInstance, rule: Rule) {
+        val params = instance.params ?: return
+        val view = instance.view ?: return
+        val sizePx = instance.sizePx
+        val density = resources.displayMetrics.density
+        val targetSpeedPxs = rule.driftSpeed.coerceIn(50f, 400f) * density  // 슬라이더 상한과 동일
+
+        val floor = (screenHeight - sizePx).toFloat().coerceAtLeast(0f)
+        val ceiling = 0f
+        val leftWall = 0f
+        val rightWall = (screenWidth - sizePx).toFloat().coerceAtLeast(0f)
+
+        var x = params.x.toFloat()
+        var y = params.y.toFloat()  // 사용자 위치 그대로
+        val rad = rule.directionalAngleDeg * Math.PI.toFloat() / 180f
+        var ux = kotlin.math.cos(rad).toFloat()
+        var uy = kotlin.math.sin(rad).toFloat()
+        val rotateDir = if (Math.random() < 0.5) 1f else -1f
+        val startNanos = System.nanoTime()
+        var lastNanos = startNanos
+        val accelRampSec = 1.5f
+
+        val animator = ValueAnimator.ofFloat(0f, 1f).apply {
+            duration = Long.MAX_VALUE / 2
+            interpolator = LinearInterpolator()
+            repeatCount = ValueAnimator.INFINITE
+        }
+        instance.currentAnimator = animator
+
+        animator.addUpdateListener {
+            if (instance.isCleanedUp) { animator.cancel(); return@addUpdateListener }
+            val now = System.nanoTime()
+            val dt = ((now - lastNanos) / 1_000_000_000f).coerceAtMost(0.05f)
+            lastNanos = now
+            val elapsed = (now - startNanos) / 1_000_000_000f
+
+            val speedScale = if (rule.driftAccelerate) (elapsed / accelRampSec).coerceAtMost(1f) else 1f
+            val curSpeed = targetSpeedPxs * speedScale
+            x += ux * curSpeed * dt
+            y += uy * curSpeed * dt
+
+            if (rule.driftBounceWalls) {
+                if (x < leftWall) { x = leftWall; ux = -ux }
+                else if (x > rightWall) { x = rightWall; ux = -ux }
+            }
+            if (rule.driftBounceCeiling && y < ceiling) { y = ceiling; uy = -uy }
+            if (rule.driftBounceFloor && y > floor) { y = floor; uy = -uy }
+
+            if (x < -sizePx * 2 || x > screenWidth + sizePx ||
+                y < -sizePx * 2 || y > screenHeight + sizePx
+            ) {
+                animator.cancel()
+                instance.cleanup()
+                return@addUpdateListener
+            }
+
+            params.x = x.toInt()
+            params.y = y.toInt()
+            try { windowManager?.updateViewLayout(view, params) }
+            catch (_: Exception) { animator.cancel(); return@addUpdateListener }
+            if (rule.driftRotate) {
+                view.rotation = (view.rotation + 30f * speedScale * rotateDir * dt) % 360f
+            }
+        }
+        animator.start()
+    }
+
+    /**
+     * Peek 모드 — 4 모서리 중 한 곳에서 절반쯤 나왔다 사라짐.
+     * 진행: off-screen → 슬라이드 인 → hold → 슬라이드 아웃 → cleanup.
+     */
+    private fun startPeekEntry(instance: OverlayInstance, rule: Rule) {
+        val params = instance.params ?: return
+        val view = instance.view ?: return
+        val sizePx = instance.sizePx
+
+        val side = if (rule.peekSide == "random") {
+            listOf("top", "bottom", "left", "right").random()
+        } else rule.peekSide
+
+        val centerX = (screenWidth - sizePx) / 2
+        val centerY = (screenHeight - sizePx) / 2
+        val (startX, startY, peekX, peekY) = when (side) {
+            "top" -> intArrayOf(centerX, -sizePx, centerX, -sizePx / 2)
+            "bottom" -> intArrayOf(centerX, screenHeight, centerX, screenHeight - sizePx / 2)
+            "left" -> intArrayOf(-sizePx, centerY, -sizePx / 2, centerY)
+            else -> intArrayOf(screenWidth, centerY, screenWidth - sizePx / 2, centerY)
+        }.let { listOf(it[0], it[1], it[2], it[3]) }
+
+        // 즉시 시작 위치로 점프 (사용자 눈에 화면 가운데 안 보이게)
+        params.x = startX
+        params.y = startY
+        try { windowManager?.updateViewLayout(view, params) } catch (_: Exception) { return }
+
+        val slideInMs = 400L
+        val holdMs = (rule.peekHoldSec * 1000).toLong().coerceAtLeast(100L)
+        val slideOutMs = 400L
+
+        val animator = ValueAnimator.ofFloat(0f, 1f)
+        animator.duration = slideInMs + holdMs + slideOutMs
+        animator.interpolator = LinearInterpolator()
+        instance.currentAnimator = animator
+        animator.addUpdateListener { anim ->
+            if (instance.isCleanedUp) { anim.cancel(); return@addUpdateListener }
+            val elapsedMs = (anim.animatedValue as Float * animator.duration).toLong()
+            val (nx, ny) = when {
+                elapsedMs < slideInMs -> {
+                    val t = elapsedMs.toFloat() / slideInMs
+                    val ease = 1f - (1f - t) * (1f - t)
+                    (startX + (peekX - startX) * ease).toInt() to
+                    (startY + (peekY - startY) * ease).toInt()
+                }
+                elapsedMs < slideInMs + holdMs -> peekX to peekY
+                else -> {
+                    val t = (elapsedMs - slideInMs - holdMs).toFloat() / slideOutMs
+                    val ease = t * t
+                    (peekX + (startX - peekX) * ease).toInt() to
+                    (peekY + (startY - peekY) * ease).toInt()
+                }
+            }
+            params.x = nx; params.y = ny
+            try { windowManager?.updateViewLayout(view, params) }
+            catch (_: Exception) { anim.cancel() }
+        }
+        animator.addListener(object : AnimatorListenerAdapter() {
+            override fun onAnimationEnd(animation: Animator) {
+                // 사운드가 계속 재생 중이면 그대로 두고, 뷰만 정리
+                instance.cleanup()
+            }
+        })
+        animator.start()
+    }
+
     private fun startMarbleEntry(instance: OverlayInstance, rule: Rule) {
         val params = instance.params ?: return
         val sizePx = instance.sizePx
@@ -362,17 +651,17 @@ class OverlayService : Service() {
         val g = 9.81f * pxPerMeter * gravityScale
         val bouncePeak = effective(rule.bouncePeak, rule.bouncePeakRandom, 0.3f, 0.8f)
 
-        val insets = getSafeInsets()
+        // 인셋 제외 — 화면 끝까지 사용. (사용자가 floorOffset으로 바닥 여백을 조정 가능)
         val startX = params.x.toFloat()
         val startY = screenHeight.toFloat()
-        val groundY = (screenHeight - sizePx - insets.bottom - rule.floorOffset * density)
+        val groundY = (screenHeight - sizePx - rule.floorOffset * density)
         val peakY = (1f - bouncePeak) * screenHeight
         val peakHeight = startY - peakY
         val v0y = -sqrt(2f * g * peakHeight)
 
         val firstFlightT = (-v0y + sqrt(v0y * v0y + 2f * g * (groundY - startY))) / g
-        val xMaxStart = (screenWidth - sizePx - insets.right).toFloat()
-        val xMinStart = insets.left.toFloat()
+        val xMaxStart = (screenWidth - sizePx).toFloat()
+        val xMinStart = 0f
         val endX = (Math.random() * (xMaxStart - xMinStart) + xMinStart).toFloat()
         val initialVx = (endX - startX) / firstFlightT
 
@@ -395,12 +684,12 @@ class OverlayService : Service() {
         val spinScale = effective(rule.spinScale, rule.spinScaleRandom, 0f, 3f)
         val elasticity = effective(rule.elasticity, rule.elasticityRandom, 0f, 1f)
 
-        val insets = getSafeInsets()
+        // 인셋 제외 — 화면 끝까지 사용
         val g = 9.81f * pxPerMeter * gravityScale
-        val groundY = (screenHeight - sizePx - insets.bottom - rule.floorOffset * density)
-        val ceilingY = insets.top.toFloat()
-        val maxX = (screenWidth - sizePx - insets.right).toFloat()
-        val minX = insets.left.toFloat()
+        val groundY = (screenHeight - sizePx - rule.floorOffset * density)
+        val ceilingY = 0f
+        val maxX = (screenWidth - sizePx).toFloat()
+        val minX = 0f
         val radius = sizePx / 2f
         val friction = 800f * density
         val bounceCutoff = 150f * density
@@ -524,14 +813,16 @@ class OverlayService : Service() {
                             fadeAudioOut(instance, rule, 450)
                             flingTo(instance, params.x + (vx * 0.5f).toInt(), params.y + (vy * 0.5f).toInt())
                         } else {
-                            if (rule.entryMode == "marble") {
-                                runMarbleSimulation(
+                            when (rule.entryMode) {
+                                "marble" -> runMarbleSimulation(
                                     instance,
                                     params.x.toFloat(), params.y.toFloat(),
                                     vx, vy, rule
                                 )
-                            } else {
-                                springBackTo(instance)
+                                // drift/directional은 사용자가 놓은 위치에서 그대로 관성 유지
+                                "drift" -> startDriftEntry(instance, rule)
+                                "directional" -> startDirectionalEntry(instance, rule)
+                                else -> springBackTo(instance)
                             }
                             // 사용자가 만지작거리고 닫지 않았으면 시간 연장 — 충분히 보고 결정할 시간 줌
                             scheduleDismiss(instance, 6000)
@@ -630,6 +921,9 @@ class OverlayService : Service() {
         else WindowManager.LayoutParams.TYPE_PHONE
         val flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                 WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
+        // 저장 버튼만 focusable로 — BACK 키를 받아 취소 처리
+        val focusableFlags = WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
+                WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH
 
         val btnH = (52 * density).toInt()
         val btnY = screenHeight - getSafeInsets().bottom - btnH - (40 * density).toInt()
@@ -651,7 +945,7 @@ class OverlayService : Service() {
             y = btnY
         }
 
-        // 저장 버튼 (우측 끝)
+        // 저장 버튼 (우측 끝) — focusable로 BACK 키 수신
         val saveW = (90 * density).toInt()
         val saveButton = makeFloatingButton(
             text = "저장",
@@ -659,17 +953,26 @@ class OverlayService : Service() {
             textSizeSp = 14f
         )
         val saveParams = WindowManager.LayoutParams(
-            saveW, btnH, type, flags, PixelFormat.TRANSLUCENT
+            saveW, btnH, type, focusableFlags, PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
             x = screenWidth - saveW - sideMargin
             y = btnY
+        }
+        saveButton.isFocusable = true
+        saveButton.isFocusableInTouchMode = true
+        saveButton.setOnKeyListener { _, keyCode, event ->
+            if (keyCode == android.view.KeyEvent.KEYCODE_BACK && event.action == android.view.KeyEvent.ACTION_UP) {
+                cancelEdit(instance)
+                true
+            } else false
         }
 
         try { windowManager?.addView(resetButton, resetParams) } catch (_: Exception) { return }
         editResetButtonView = resetButton
         try { windowManager?.addView(saveButton, saveParams) } catch (_: Exception) { return }
         editSaveButtonView = saveButton
+        saveButton.requestFocus()
 
         attachDraggableButton(resetButton, resetParams) {
             // 미디어를 화면 가운데로 리셋 (저장은 안 함 — 사용자가 저장 버튼 누를 때까지)
@@ -681,6 +984,19 @@ class OverlayService : Service() {
         attachDraggableButton(saveButton, saveParams) {
             saveAndDismissEdit(instance, ruleId)
         }
+    }
+
+    /** 위치 편집 취소 — 변경사항 버리고 그냥 종료. */
+    private fun cancelEdit(instance: OverlayInstance) {
+        editSaveButtonView?.let {
+            try { windowManager?.removeView(it) } catch (_: Exception) {}
+            editSaveButtonView = null
+        }
+        editResetButtonView?.let {
+            try { windowManager?.removeView(it) } catch (_: Exception) {}
+            editResetButtonView = null
+        }
+        instance.cleanup()
     }
 
     private fun makeFloatingButton(
@@ -782,6 +1098,17 @@ class OverlayService : Service() {
                         }
                     }
                 } catch (_: Exception) {}
+            } else if (rule.mediaType == "lottie") {
+                try {
+                    return com.airbnb.lottie.LottieAnimationView(this).apply {
+                        val jsonStr = contentResolver.openInputStream(uri)?.use { it.bufferedReader().readText() }
+                        if (jsonStr != null) {
+                            setAnimationFromJson(jsonStr, uri.toString())
+                            repeatCount = com.airbnb.lottie.LottieDrawable.INFINITE
+                            playAnimation()
+                        }
+                    }
+                } catch (_: Exception) {}
             } else {
                 try {
                     return ImageView(this).apply {
@@ -862,16 +1189,13 @@ class OverlayService : Service() {
 
         val muteVideo = !rule.useVideoSound || shouldSkipSound(rule)
         // 재생 시점의 setVolume 값을 그대로 페이드 시작점으로 사용.
-        // gain <= 0이면 감쇠 스케일, gain > 0이면 1.0 (부스트는 LoudnessEnhancer 쪽).
-        val gainDb = if (rule.measuredLoudnessDb != null) {
-            rule.targetLoudnessDb - rule.measuredLoudnessDb!!
-        } else {
-            rule.targetLoudnessDb
-        }
-        val mpBase = if (gainDb <= 0f) {
-            Math.pow(10.0, gainDb.toDouble() / 20.0).toFloat().coerceIn(0f, 1f)
-        } else 1f
-        val vmpBase = if (muteVideo) 0f else 1f
+        // playSound와 동일한 수식 — finalLinear가 1보다 크면 setVolume은 이미 1.0, 부스트는 LoudnessEnhancer.
+        val normalizedGainDb = if (rule.measuredLoudnessDb != null)
+            rule.targetLoudnessDb - rule.measuredLoudnessDb!! else 0f
+        val normalizedLinear = Math.pow(10.0, normalizedGainDb.toDouble() / 20.0).toFloat()
+        val finalLinear = normalizedLinear * rule.userVolume.coerceIn(0f, 1f)
+        val mpBase = finalLinear.coerceAtMost(1f)
+        val vmpBase = if (muteVideo) 0f else rule.userVolume.coerceIn(0f, 1f)
 
         val animator = ValueAnimator.ofFloat(1f, 0f).apply {
             duration = fadeDurationMs
@@ -931,6 +1255,16 @@ class OverlayService : Service() {
         dismissHandler.postDelayed(r, delayMs)
     }
 
+    /** View를 원형으로 마스킹 (이미지/동영상 공통). */
+    private fun applyCircleClip(view: View) {
+        view.outlineProvider = object : ViewOutlineProvider() {
+            override fun getOutline(v: View, outline: Outline) {
+                outline.setOval(0, 0, v.width, v.height)
+            }
+        }
+        view.clipToOutline = true
+    }
+
     private fun playSound(instance: OverlayInstance, rule: Rule): Int {
         if (rule.mediaType == "video" && rule.mediaUri != null && rule.useVideoSound) return 0
         if (shouldSkipSound(rule)) return 0
@@ -957,26 +1291,25 @@ class OverlayService : Service() {
             }
             mp.prepare()
 
-            // 정규화 게인 계산:
-            //   measured(원본 음량) → target(목표 음량) 차이만큼 보정
-            //   measured == null이면 폴백: targetLoudnessDb를 그대로 감쇠로 사용
-            val gainDb = if (rule.measuredLoudnessDb != null) {
+            // 1) 자동 정규화 — 모든 사운드를 targetLoudnessDb로 보정 (UI엔 노출 X)
+            // 2) 그 위에 사용자 음량 (userVolume 0.0~1.0) 곱함
+            val normalizedGainDb = if (rule.measuredLoudnessDb != null)
                 rule.targetLoudnessDb - rule.measuredLoudnessDb!!
-            } else {
-                rule.targetLoudnessDb
-            }
+            else 0f  // 측정값 없으면 정규화 스킵 (원본 그대로)
+            val normalizedLinear = Math.pow(10.0, normalizedGainDb.toDouble() / 20.0).toFloat()
+            val userScale = rule.userVolume.coerceIn(0f, 1f)
+            val finalLinear = normalizedLinear * userScale
 
-            if (gainDb <= 0f) {
-                // 감쇠만: MediaPlayer.setVolume (0..1)
-                val scale = Math.pow(10.0, gainDb.toDouble() / 20.0).toFloat().coerceIn(0f, 1f)
-                mp.setVolume(scale, scale)
+            if (finalLinear <= 1f) {
+                // 감쇠 (또는 정확히 1.0) — MediaPlayer.setVolume만으로 처리
+                mp.setVolume(finalLinear, finalLinear)
             } else {
-                // 부스트: setVolume(1.0) + LoudnessEnhancer
+                // 부스트 필요 — setVolume(1.0) + LoudnessEnhancer
                 mp.setVolume(1f, 1f)
+                val boostDb = (20.0 * kotlin.math.log10(finalLinear.toDouble())).toFloat()
                 try {
                     val enhancer = android.media.audiofx.LoudnessEnhancer(mp.audioSessionId)
-                    // 1 dB = 100 mB. 안전한 부스트 한계 ~24 dB (그 이상은 클리핑 위험)
-                    val mb = (gainDb * 100f).toInt().coerceIn(0, 2400)
+                    val mb = (boostDb * 100f).toInt().coerceIn(0, 2400)  // 최대 +24dB
                     enhancer.setTargetGain(mb)
                     enhancer.enabled = true
                     instance.loudnessEnhancer = enhancer
@@ -985,9 +1318,31 @@ class OverlayService : Service() {
                 }
             }
 
+            // 컷 편집 적용
+            val totalMs = mp.duration
+            val startMs = rule.soundStartMs.coerceIn(0, totalMs.coerceAtLeast(0))
+            val endMs = if (rule.soundEndMs in 1..totalMs) rule.soundEndMs else totalMs
+            if (startMs > 0) {
+                try { mp.seekTo(startMs) } catch (_: Exception) {}
+            }
             mp.start()
             instance.mediaPlayer = mp
-            mp.duration
+
+            // 종료 시점에서 자동 정지 — endMs가 totalMs보다 작을 때만
+            val effectiveDuration = endMs - startMs
+            if (endMs < totalMs && effectiveDuration > 0) {
+                dismissHandler.postDelayed({
+                    try {
+                        if (mp.isPlaying) {
+                            mp.stop()
+                            try { instance.loudnessEnhancer?.release() } catch (_: Exception) {}
+                            instance.loudnessEnhancer = null
+                            mp.release()
+                        }
+                    } catch (_: Exception) {}
+                }, effectiveDuration.toLong())
+            }
+            effectiveDuration.coerceAtLeast(0)
         } catch (e: Exception) {
             Log.e("OverlayService", "사운드 재생 실패", e)
             0

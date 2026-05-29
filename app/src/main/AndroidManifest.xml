@@ -11,6 +11,7 @@
         tools:ignore="QueryAllPackagesPermission" />
 
     <application
+        android:name=".App"
         android:allowBackup="true"
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:fullBackupContent="@xml/backup_rules"
@@ -19,6 +20,8 @@
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
         android:theme="@style/Theme.MyApplication">
+
+        <!-- AdMob 광고는 V1에서 제외 (정책/UX 리스크 회피). V1.1 이후 재활성화 시 meta-data 복원. -->
 
         <activity
             android:name=".MainActivity"
