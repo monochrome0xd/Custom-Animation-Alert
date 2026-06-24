@@ -57,6 +57,7 @@ class OverlayService : Service() {
         var centerY = 0
         var sizePx = 0
         var wakeLock: PowerManager.WakeLock? = null
+        var hiddenByKeyboard = false  // #42 — 키보드 영역과 겹쳐 숨김 처리된 상태
 
         fun cleanup(checkStopSelf: Boolean = true) {
             if (isCleanedUp) return
@@ -97,6 +98,11 @@ class OverlayService : Service() {
     // 위치 편집 모드용 오버레이 버튼들
     private var editSaveButtonView: View? = null
     private var editResetButtonView: View? = null
+
+    // #42 — 키보드(IME) 감지용 1px 헬퍼 윈도우 + 키보드 상단 Y (MAX = 키보드 없음)
+    private var imeHelperView: View? = null
+    private var imeLayoutListener: android.view.ViewTreeObserver.OnGlobalLayoutListener? = null
+    private var keyboardTopY: Int = Int.MAX_VALUE
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -358,10 +364,9 @@ class OverlayService : Service() {
             gravity = Gravity.TOP or Gravity.START
             // 마블 시작 X도 사용자 위치 기준 (랜덤 X 대신 centerX = 사용자 targetX)
             x = instance.centerX
-            // directional/peek은 별도 시작 위치 사용, marble/drift는 화면 아래에서 진입
-            y = if (rule.entryAnimation &&
-                    rule.entryMode != "directional" &&
-                    rule.entryMode != "peek") screenHeight
+            // marble만 화면 아래에서 튀어오름. drift/directional/peek은 사용자가 지정한 위치에서 시작.
+            // (#41 — drift가 무조건 화면 맨 아래에서 시작하던 버그 수정: 이제 설정 위치에서 상승)
+            y = if (rule.entryAnimation && rule.entryMode == "marble") screenHeight
                 else instance.centerY
         }
         instance.params = params
@@ -369,6 +374,10 @@ class OverlayService : Service() {
         try { windowManager?.addView(view, params) } catch (e: Exception) {
             instance.cleanup(); return
         }
+
+        // #42 — 키보드 감지 워처 시작 + 초기 가시성 평가 (키보드가 이미 떠 있으면 즉시 숨김)
+        ensureKeyboardWatcher()
+        applyKeyboardVisibility(instance)
 
         if (rule.entryAnimation) {
             when (rule.entryMode) {
@@ -430,7 +439,7 @@ class OverlayService : Service() {
         val view = instance.view ?: return
         val sizePx = instance.sizePx
         val density = resources.displayMetrics.density
-        val targetSpeedPxs = rule.driftSpeed.coerceIn(50f, 400f) * density  // 슬라이더 상한과 동일
+        val targetSpeedPxs = rule.driftSpeed.coerceIn(50f, 1000f) * density  // 슬라이더 상한과 동일
 
         // 화면 가장자리까지 — 인셋 무시
         val floor = (screenHeight - sizePx).toFloat().coerceAtLeast(0f)
@@ -498,6 +507,7 @@ class OverlayService : Service() {
             params.y = y.toInt()
             try { windowManager?.updateViewLayout(view, params) }
             catch (_: Exception) { animator.cancel(); return@addUpdateListener }
+            applyKeyboardVisibility(instance)  // #42 — 이동 중 키보드 영역 진입/이탈 시 숨김 토글
             if (rule.driftRotate) {
                 view.rotation = (view.rotation + 30f * speedScale * dt) % 360f
             }
@@ -514,7 +524,7 @@ class OverlayService : Service() {
         val view = instance.view ?: return
         val sizePx = instance.sizePx
         val density = resources.displayMetrics.density
-        val targetSpeedPxs = rule.driftSpeed.coerceIn(50f, 400f) * density  // 슬라이더 상한과 동일
+        val targetSpeedPxs = rule.driftSpeed.coerceIn(50f, 1000f) * density  // 슬라이더 상한과 동일
 
         val floor = (screenHeight - sizePx).toFloat().coerceAtLeast(0f)
         val ceiling = 0f
@@ -569,6 +579,7 @@ class OverlayService : Service() {
             params.y = y.toInt()
             try { windowManager?.updateViewLayout(view, params) }
             catch (_: Exception) { animator.cancel(); return@addUpdateListener }
+            applyKeyboardVisibility(instance)  // #42 — 이동 중 키보드 영역 진입/이탈 시 숨김 토글
             if (rule.driftRotate) {
                 view.rotation = (view.rotation + 30f * speedScale * rotateDir * dt) % 360f
             }
@@ -632,6 +643,7 @@ class OverlayService : Service() {
             params.x = nx; params.y = ny
             try { windowManager?.updateViewLayout(view, params) }
             catch (_: Exception) { anim.cancel() }
+            applyKeyboardVisibility(instance)  // #42 — peek 이동 중 키보드 영역 숨김 토글
         }
         animator.addListener(object : AnimatorListenerAdapter() {
             override fun onAnimationEnd(animation: Animator) {
@@ -747,6 +759,7 @@ class OverlayService : Service() {
             instance.centerX = currentX.toInt()
             instance.centerY = currentY.toInt()
             try { windowManager?.updateViewLayout(view, params) } catch (_: Exception) {}
+            applyKeyboardVisibility(instance)  // #42 — 마블 낙하/구르는 중 키보드 영역 숨김 토글
         }
         instance.currentAnimator = animator
         animator.start()
@@ -1349,8 +1362,79 @@ class OverlayService : Service() {
         }
     }
 
+    /**
+     * #42 — 키보드(IME)가 떠 있을 때 오버레이가 키보드 영역과 겹치면 완전히 숨김.
+     * SYSTEM_ALERT_WINDOW 오버레이는 다른 앱의 IME inset을 직접 받지 못하므로,
+     * 1px 헬퍼 윈도우의 가시 영역(getWindowVisibleDisplayFrame) 변화로 키보드 높이를 추정한다.
+     * 감지가 실패하는 기기에선 keyboardTopY가 MAX_VALUE로 남아 아무것도 숨기지 않음(무해한 폴백).
+     */
+    private fun ensureKeyboardWatcher() {
+        if (imeHelperView != null) return
+        val wm = windowManager ?: return
+        val v = View(this)
+        val type = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+        else WindowManager.LayoutParams.TYPE_PHONE
+        val lp = WindowManager.LayoutParams(
+            1,
+            WindowManager.LayoutParams.MATCH_PARENT,
+            type,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE,
+            PixelFormat.TRANSPARENT
+        ).apply {
+            gravity = Gravity.TOP or Gravity.START
+            @Suppress("DEPRECATION")
+            softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
+        }
+        try { wm.addView(v, lp) } catch (_: Exception) { return }
+        imeHelperView = v
+        val listener = android.view.ViewTreeObserver.OnGlobalLayoutListener {
+            val hv = imeHelperView ?: return@OnGlobalLayoutListener
+            val r = android.graphics.Rect()
+            try { hv.getWindowVisibleDisplayFrame(r) } catch (_: Exception) { return@OnGlobalLayoutListener }
+            val screenH = resources.displayMetrics.heightPixels
+            val covered = screenH - r.bottom
+            // 화면 높이의 15% 이상 하단이 가려지면 키보드로 간주 (내비게이션 바보다 큼)
+            keyboardTopY = if (covered > screenH * 0.15f) r.bottom else Int.MAX_VALUE
+            applyKeyboardVisibilityToAll()
+        }
+        v.viewTreeObserver.addOnGlobalLayoutListener(listener)
+        imeLayoutListener = listener
+    }
+
+    private fun removeKeyboardWatcher() {
+        val v = imeHelperView ?: return
+        try { imeLayoutListener?.let { v.viewTreeObserver.removeOnGlobalLayoutListener(it) } } catch (_: Exception) {}
+        try { windowManager?.removeView(v) } catch (_: Exception) {}
+        imeHelperView = null
+        imeLayoutListener = null
+        keyboardTopY = Int.MAX_VALUE
+    }
+
+    private fun applyKeyboardVisibilityToAll() {
+        instances.toList().forEach { applyKeyboardVisibility(it) }
+    }
+
+    /** 인스턴스가 키보드 영역과 세로로 겹치면 INVISIBLE, 벗어나면 VISIBLE. */
+    private fun applyKeyboardVisibility(instance: OverlayInstance) {
+        if (instance.isCleanedUp) return
+        val view = instance.view ?: return
+        val params = instance.params ?: return
+        val kbTop = keyboardTopY
+        val overlaps = kbTop != Int.MAX_VALUE && (params.y + instance.sizePx) > kbTop
+        if (overlaps && !instance.hiddenByKeyboard) {
+            instance.hiddenByKeyboard = true
+            view.visibility = View.INVISIBLE
+        } else if (!overlaps && instance.hiddenByKeyboard) {
+            instance.hiddenByKeyboard = false
+            view.visibility = View.VISIBLE
+        }
+    }
+
     override fun onDestroy() {
         super.onDestroy()
+        removeKeyboardWatcher()
         instances.toList().forEach { it.cleanup(checkStopSelf = false) }
         instances.clear()
         editSaveButtonView?.let {

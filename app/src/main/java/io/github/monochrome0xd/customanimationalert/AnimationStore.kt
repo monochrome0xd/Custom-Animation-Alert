@@ -42,8 +42,21 @@ object AnimationStore {
         val measuredLoudnessDb: Double? = null,
         val ruleJson: String = "",
         val downloadCount: Long = 0,
-        val likes: Long = 0
+        val likes: Long = 0,
+        val isPrivate: Boolean = false,  // #39 — 비공개 공유: 일반 목록에 안 뜨고 제목 정확 검색으로만 노출
+        val passwordHash: String = ""    // #39b — 비공개 + 비밀번호: SHA-256 해시. 빈 문자열이면 비번 없음
     )
+
+    /** 비밀번호 → SHA-256 hex. 평문은 저장하지 않고 해시만 Firestore에 둠. */
+    fun hashPassword(pw: String): String {
+        val digest = java.security.MessageDigest.getInstance("SHA-256")
+            .digest(pw.toByteArray(Charsets.UTF_8))
+        return digest.joinToString("") { "%02x".format(it) }
+    }
+
+    /** 입력 비밀번호가 해당 콘텐츠 비번과 일치하는지. 비번 없는 콘텐츠는 항상 true. */
+    fun verifyPassword(animation: RemoteAnimation, input: String): Boolean =
+        animation.passwordHash.isEmpty() || hashPassword(input) == animation.passwordHash
 
     /**
      * 규칙을 클라우드에 업로드.
@@ -57,6 +70,8 @@ object AnimationStore {
         rule: Rule,
         customTitle: String? = null,
         includeApp: Boolean = false,
+        isPrivate: Boolean = false,
+        password: String? = null,
         onProgress: (Float) -> Unit = {}
     ): Result<String> {
         val user = AuthManager.currentUser
@@ -107,7 +122,10 @@ object AnimationStore {
                 "ruleJson" to effectiveRule.toJson().toString(),
                 "createdAt" to FieldValue.serverTimestamp(),
                 "downloadCount" to 0L,
-                "likes" to 0L
+                "likes" to 0L,
+                "isPrivate" to isPrivate,
+                // 비번은 비공개일 때만, 입력이 있을 때만 해시로 저장
+                "passwordHash" to (if (isPrivate && !password.isNullOrBlank()) hashPassword(password) else "")
             )
             firestore.collection(COLLECTION).document(animationId).set(data).await()
 
@@ -119,30 +137,60 @@ object AnimationStore {
         }
     }
 
-    /** Firestore에서 최신 애니메이션 목록 조회 (최대 limit개, createdAt 내림차순). */
+    /**
+     * Firestore에서 최신 애니메이션 목록 조회 (createdAt 내림차순).
+     * #39 — 비공개(isPrivate) 항목은 제외. private이 끼어 있을 수 있으니 넉넉히 받고 클라이언트에서 필터.
+     */
     suspend fun listRecent(limit: Long = 30): Result<List<RemoteAnimation>> =
         runQuery(
             firestore.collection(COLLECTION)
                 .orderBy("createdAt", Query.Direction.DESCENDING)
-                .limit(limit)
-        )
+                .limit(limit * 2)
+        ).map { list -> list.filter { !it.isPrivate }.take(limit.toInt()) }
 
-    /** 다운로드 수 많은 순 (전체 인기). */
+    /** 다운로드 수 많은 순 (전체 인기). 비공개 제외. */
     suspend fun listPopular(limit: Long = 30): Result<List<RemoteAnimation>> =
         runQuery(
             firestore.collection(COLLECTION)
                 .orderBy("downloadCount", Query.Direction.DESCENDING)
-                .limit(limit)
-        )
+                .limit(limit * 2)
+        ).map { list -> list.filter { !it.isPrivate }.take(limit.toInt()) }
 
-    /** 특정 카테고리 (groupName) 내 최신순. */
+    /** 특정 카테고리 (groupName) 내 최신순. 비공개 제외. */
     suspend fun listByCategory(category: String, limit: Long = 30): Result<List<RemoteAnimation>> =
         runQuery(
             firestore.collection(COLLECTION)
                 .whereEqualTo("categoryName", category)
                 .orderBy("createdAt", Query.Direction.DESCENDING)
-                .limit(limit)
-        )
+                .limit(limit * 2)
+        ).map { list -> list.filter { !it.isPrivate }.take(limit.toInt()) }
+
+    /**
+     * #38/#39 — 마켓 검색.
+     * - 공개 항목: 제목에 query가 포함되면 노출 (대소문자 무시, 최근 200개 범위 내).
+     * - 비공개 항목: 제목이 query와 정확히 일치할 때만 노출 (#39).
+     * 복합 인덱스 불필요 (orderBy createdAt 단일 + whereEqualTo title 단일).
+     */
+    suspend fun search(query: String): Result<List<RemoteAnimation>> {
+        val q = query.trim()
+        if (q.isBlank()) return Result.success(emptyList())
+        return try {
+            // 공개 항목 부분 일치 (최근 200개 내)
+            val recentSnap = firestore.collection(COLLECTION)
+                .orderBy("createdAt", Query.Direction.DESCENDING)
+                .limit(200).get().await()
+            val recent = recentSnap.documents.mapNotNull { parseDoc(it) }
+            val publicMatches = recent.filter { !it.isPrivate && it.title.contains(q, ignoreCase = true) }
+            // 제목 정확 일치 (비공개 포함)
+            val exactSnap = firestore.collection(COLLECTION)
+                .whereEqualTo("title", q).limit(20).get().await()
+            val exactMatches = exactSnap.documents.mapNotNull { parseDoc(it) }
+            Result.success((publicMatches + exactMatches).distinctBy { it.id })
+        } catch (e: Exception) {
+            Log.e(TAG, "search failed", e)
+            Result.failure(e)
+        }
+    }
 
     /**
      * 내가 업로드한 애니메이션 (최신순).
@@ -238,17 +286,56 @@ object AnimationStore {
         }
     }
 
+    /**
+     * #40 — 관리자(부적절 콘텐츠) 삭제. 소유권 검사 없이 Admin 권한으로 삭제.
+     * 실제 Firestore 차단은 보안 규칙에서 admin만 타인 문서 삭제 가능하도록 설정돼 있어야 함.
+     */
+    suspend fun adminDelete(animation: RemoteAnimation): Result<Unit> {
+        if (!Admin.isAdmin) return Result.failure(IllegalStateException("관리자만 가능"))
+        return try {
+            try { storage.getReferenceFromUrl(animation.mediaUrl).delete().await() }
+            catch (e: Exception) { Log.w(TAG, "admin media delete failed", e) }
+            animation.soundUrl?.let { url ->
+                try { storage.getReferenceFromUrl(url).delete().await() }
+                catch (e: Exception) { Log.w(TAG, "admin sound delete failed", e) }
+            }
+            firestore.collection(COLLECTION).document(animation.id).delete().await()
+            Log.d(TAG, "admin deleted animation ${animation.id}")
+            Result.success(Unit)
+        } catch (e: Exception) {
+            Log.e(TAG, "admin delete failed", e)
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * #40 — 신고 검토 화면에서 animationId만으로 관리자 삭제.
+     * 문서를 먼저 읽어 Storage 경로(mediaUrl/soundUrl)를 확보한 뒤 adminDelete로 위임.
+     * 이미 삭제됐으면 성공으로 간주.
+     */
+    suspend fun adminDeleteById(animationId: String): Result<Unit> {
+        if (!Admin.isAdmin) return Result.failure(IllegalStateException("관리자만 가능"))
+        return try {
+            val doc = firestore.collection(COLLECTION).document(animationId).get().await()
+            val animation = parseDoc(doc)
+                ?: return Result.success(Unit)  // 이미 없음
+            adminDelete(animation)
+        } catch (e: Exception) {
+            Log.e(TAG, "adminDeleteById failed", e)
+            Result.failure(e)
+        }
+    }
+
+    private fun parseDoc(doc: com.google.firebase.firestore.DocumentSnapshot): RemoteAnimation? = try {
+        doc.toObject(RemoteAnimation::class.java)?.copy(id = doc.id)
+    } catch (e: Exception) {
+        Log.w(TAG, "failed to parse doc ${doc.id}", e)
+        null
+    }
+
     private suspend fun runQuery(query: Query): Result<List<RemoteAnimation>> = try {
         val snapshot = query.get().await()
-        val items = snapshot.documents.mapNotNull { doc ->
-            try {
-                doc.toObject(RemoteAnimation::class.java)?.copy(id = doc.id)
-            } catch (e: Exception) {
-                Log.w(TAG, "failed to parse doc ${doc.id}", e)
-                null
-            }
-        }
-        Result.success(items)
+        Result.success(snapshot.documents.mapNotNull { parseDoc(it) })
     } catch (e: Exception) {
         Log.e(TAG, "query failed", e)
         Result.failure(e)

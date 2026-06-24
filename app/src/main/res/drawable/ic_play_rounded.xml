@@ -1,0 +1,15 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <!-- 모서리 둥근 재생 삼각형. fill + 같은색 round-join stroke 로 코너를 둥글게.
+         색은 Icon(tint=...) 으로 런타임에 입혀짐(흰색 → 테마색). -->
+    <path
+        android:pathData="M8.5,6.2 L18,12 L8.5,17.8 Z"
+        android:fillColor="#FFFFFFFF"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeWidth="3"
+        android:strokeLineJoin="round"
+        android:strokeLineCap="round" />
+</vector>

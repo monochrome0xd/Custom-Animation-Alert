@@ -1,0 +1,19 @@
+rules_version = '2';
+
+// Custom Animation Alert — Firebase Storage 보안 규칙
+// Firebase 콘솔 → Storage → 규칙(Rules) 탭에 붙여넣고 "게시"하세요.
+//
+// 미디어 경로: animations/{animationId}/media.{ext}, sound.{ext}
+// 경로에 소유자 UID가 없어서 Storage 단독으로는 소유자 제한이 어렵다.
+// 따라서 실제 소유권/관리자 권한 통제는 Firestore(문서 삭제)에서 하고,
+// 여기서는 "로그인 사용자만 쓰기/삭제, 읽기는 공개"로 둔다.
+// (#40 관리자 삭제: 관리자가 Firestore 문서를 지우고 Storage 파일도 함께 삭제)
+
+service firebase.storage {
+  match /b/{bucket}/o {
+    match /animations/{animationId}/{fileName} {
+      allow read: if true;                 // 마켓 미리보기/다운로드 공개
+      allow write, delete: if request.auth != null;  // 업로드/정리(본인·관리자)는 로그인 필요
+    }
+  }
+}

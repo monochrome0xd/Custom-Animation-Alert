@@ -32,6 +32,7 @@ import androidx.compose.foundation.basicMarquee
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -60,9 +61,10 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Home
+import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Share
-import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.ShoppingCart
 import androidx.compose.foundation.lazy.LazyColumn
@@ -71,6 +73,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AssistChipDefaults
@@ -78,12 +81,15 @@ import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
@@ -120,6 +126,7 @@ import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
@@ -469,7 +476,8 @@ fun LibraryTab(
                         .forEach { RuleStore.upsert(context, it) }
                     rules = RuleStore.loadAll(context)
                 }
-            }
+            },
+            onChanged = { rules = RuleStore.loadAll(context) }
         )
         is Screen.RuleEdit -> {
             val initial = rules.find { it.id == screen.ruleId }
@@ -504,11 +512,73 @@ fun MarketTab(modifier: Modifier = Modifier) {
     var detail by remember { mutableStateOf<AnimationStore.RemoteAnimation?>(null) }
     var refreshTick by remember { mutableStateOf(0) }
     var likedIds by remember { mutableStateOf<Set<String>>(emptySet()) }
+    var blockedUids by remember { mutableStateOf<Set<String>>(emptySet()) }
+
+    // #38 검색
+    var searchQuery by remember { mutableStateOf("") }
+    var searchResults by remember { mutableStateOf<List<AnimationStore.RemoteAnimation>?>(null) }
+    var searching by remember { mutableStateOf(false) }
+    val keyboard = androidx.compose.ui.platform.LocalSoftwareKeyboardController.current
+
+    // #44 신고 / #40 관리자 삭제 대상
+    var reportTarget by remember { mutableStateOf<AnimationStore.RemoteAnimation?>(null) }
+    var adminDeleteTarget by remember { mutableStateOf<AnimationStore.RemoteAnimation?>(null) }
+
+    // #39b 비밀번호: 잠금 해제된 항목 + 비밀번호 입력 대상
+    var unlockedIds by remember { mutableStateOf<Set<String>>(emptySet()) }
+    var passwordTarget by remember { mutableStateOf<AnimationStore.RemoteAnimation?>(null) }
+    // 본인 콘텐츠는 잠금 없음. passwordHash가 있고 아직 해제 안 됐으면 잠김.
+    val isLocked: (AnimationStore.RemoteAnimation) -> Boolean = { a ->
+        a.passwordHash.isNotEmpty() &&
+            a.creatorUid != AuthManager.currentUser?.uid &&
+            a.id !in unlockedIds
+    }
+    // 카드 클릭: 잠긴 항목은 비밀번호 입력, 아니면 상세로
+    val onCardClick: (AnimationStore.RemoteAnimation) -> Unit = { a ->
+        if (isLocked(a)) passwordTarget = a else detail = a
+    }
 
     LaunchedEffect(refreshTick) {
         scope.launch { recent = AnimationStore.listRecent().getOrNull() ?: emptyList() }
         scope.launch { popular = AnimationStore.listPopular().getOrNull() ?: emptyList() }
         scope.launch { likedIds = AnimationStore.fetchMyLikes() }
+        scope.launch { blockedUids = ModerationStore.fetchBlockedUids() }
+    }
+
+    fun runSearch() {
+        val q = searchQuery.trim()
+        keyboard?.hide()
+        if (q.isBlank()) { searchResults = null; return }
+        searching = true
+        scope.launch {
+            searchResults = AnimationStore.search(q).getOrNull() ?: emptyList()
+            searching = false
+        }
+    }
+
+    // #46 차단: 즉시 차단 + 목록 필터, 토스트
+    val onBlock: (AnimationStore.RemoteAnimation) -> Unit = { animation ->
+        if (AuthManager.currentUser == null) {
+            Toast.makeText(context, "로그인이 필요합니다", Toast.LENGTH_SHORT).show()
+        } else {
+            scope.launch {
+                val r = ModerationStore.blockUser(animation.creatorUid, animation.creatorName)
+                if (r.isSuccess) {
+                    blockedUids = blockedUids + animation.creatorUid
+                    Toast.makeText(context, "${animation.creatorName} 님을 차단했습니다", Toast.LENGTH_SHORT).show()
+                } else {
+                    Toast.makeText(context, "차단 실패: ${r.exceptionOrNull()?.message ?: "?"}", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+    }
+
+    val onAdminDelete: (AnimationStore.RemoteAnimation) -> Unit = { animation ->
+        adminDeleteTarget = animation
+    }
+
+    val blockFilter: (List<AnimationStore.RemoteAnimation>?) -> List<AnimationStore.RemoteAnimation>? = { list ->
+        list?.filter { it.creatorUid !in blockedUids }
     }
 
     // 좋아요 토글 — 로컬 상태 즉시 갱신 후 서버 호출
@@ -548,7 +618,10 @@ fun MarketTab(modifier: Modifier = Modifier) {
             onImported = {
                 detail = null
                 refreshTick++  // 다운로드 카운트 +1 → 목록 재조회
-            }
+            },
+            onReport = { reportTarget = it },
+            onBlock = onBlock,
+            onAdminDelete = onAdminDelete
         )
         return
     }
@@ -568,25 +641,207 @@ fun MarketTab(modifier: Modifier = Modifier) {
                 Text("마켓", style = MaterialTheme.typography.headlineSmall, modifier = Modifier.weight(1f))
             }
         }
+        // #38 검색창
+        item("search") {
+            OutlinedTextField(
+                value = searchQuery,
+                onValueChange = { searchQuery = it },
+                label = { Text("제목 검색") },
+                singleLine = true,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 24.dp),
+                keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                    imeAction = androidx.compose.ui.text.input.ImeAction.Search
+                ),
+                keyboardActions = androidx.compose.foundation.text.KeyboardActions(
+                    onSearch = { runSearch() }
+                ),
+                trailingIcon = {
+                    if (searchQuery.isNotBlank()) {
+                        IconButton(onClick = {
+                            searchQuery = ""
+                            searchResults = null
+                            keyboard?.hide()
+                        }) {
+                            Icon(Icons.Filled.Close, contentDescription = "지우기")
+                        }
+                    } else {
+                        IconButton(onClick = { runSearch() }) {
+                            Icon(Icons.Filled.Search, contentDescription = "검색")
+                        }
+                    }
+                }
+            )
+        }
+        // 검색 결과 (검색 중이거나 결과가 있을 때만)
+        if (searching || searchResults != null) {
+            item("section_search") {
+                if (searching) {
+                    Box(
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 24.dp),
+                        contentAlignment = Alignment.Center
+                    ) { CircularProgressIndicator(modifier = Modifier.size(24.dp)) }
+                } else {
+                    MarketSection(
+                        title = "검색 결과",
+                        items = blockFilter(searchResults),
+                        likedIds = likedIds,
+                        onCardClick = onCardClick,
+                        onToggleLike = onToggleLike,
+                        onReport = { reportTarget = it },
+                        onBlock = onBlock,
+                        onAdminDelete = onAdminDelete,
+                        isLocked = isLocked,
+                        emptyText = "검색 결과가 없습니다 (비공개는 제목을 정확히 입력해야 노출됩니다)"
+                    )
+                }
+            }
+        }
         item("section_recent") {
             MarketSection(
                 title = "최근",
-                items = recent,
+                items = blockFilter(recent),
                 likedIds = likedIds,
-                onCardClick = { detail = it },
-                onToggleLike = onToggleLike
+                onCardClick = onCardClick,
+                onToggleLike = onToggleLike,
+                onReport = { reportTarget = it },
+                onBlock = onBlock,
+                onAdminDelete = onAdminDelete,
+                isLocked = isLocked
             )
         }
         item("section_popular") {
             MarketSection(
                 title = "인기 (다운로드 많은 순)",
-                items = popular,
+                items = blockFilter(popular),
                 likedIds = likedIds,
-                onCardClick = { detail = it },
-                onToggleLike = onToggleLike
+                onCardClick = onCardClick,
+                onToggleLike = onToggleLike,
+                onReport = { reportTarget = it },
+                onBlock = onBlock,
+                onAdminDelete = onAdminDelete,
+                isLocked = isLocked
             )
         }
     }
+
+    // #44 신고 다이얼로그
+    reportTarget?.let { target ->
+        ReportDialog(
+            animation = target,
+            onDismiss = { reportTarget = null },
+            onSubmit = { category, note ->
+                reportTarget = null
+                scope.launch {
+                    val r = ModerationStore.report(target, category, note)
+                    val msg = if (r.isSuccess) "신고가 접수되었습니다" else "신고 실패: ${r.exceptionOrNull()?.message ?: "?"}"
+                    Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+                }
+            }
+        )
+    }
+
+    // #40 관리자 삭제 확인
+    adminDeleteTarget?.let { target ->
+        AlertDialog(
+            onDismissRequest = { adminDeleteTarget = null },
+            title = { Text("관리자 삭제") },
+            text = { Text("'${target.title.ifBlank { "(이름 없음)" }}'을(를) 마켓에서 영구 삭제합니다. 되돌릴 수 없습니다.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    adminDeleteTarget = null
+                    scope.launch {
+                        val r = AnimationStore.adminDelete(target)
+                        if (r.isSuccess) {
+                            ModerationStore.dismissReportsForAnimation(target.id)
+                            Toast.makeText(context, "삭제 완료", Toast.LENGTH_SHORT).show()
+                            refreshTick++
+                        } else {
+                            Toast.makeText(context, "삭제 실패: ${r.exceptionOrNull()?.message ?: "?"}", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                }) { Text("삭제", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = {
+                TextButton(onClick = { adminDeleteTarget = null }) { Text("취소") }
+            }
+        )
+    }
+
+    // #39b 비밀번호 입력 (잠긴 비공개 항목)
+    passwordTarget?.let { target ->
+        PasswordPromptDialog(
+            animation = target,
+            onDismiss = { passwordTarget = null },
+            onUnlock = {
+                unlockedIds = unlockedIds + target.id
+                passwordTarget = null
+                detail = target
+            }
+        )
+    }
+}
+
+@Composable
+private fun PasswordPromptDialog(
+    animation: AnimationStore.RemoteAnimation,
+    onDismiss: () -> Unit,
+    onUnlock: () -> Unit
+) {
+    var input by remember { mutableStateOf("") }
+    var showPassword by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf(false) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("비밀번호 입력") },
+        text = {
+            Column {
+                Text(
+                    "'${animation.title.ifBlank { "(이름 없음)" }}'은(는) 비공개 항목입니다. 비밀번호를 입력하세요.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(Modifier.height(12.dp))
+                OutlinedTextField(
+                    value = input,
+                    onValueChange = { input = it; error = false },
+                    label = { Text("비밀번호") },
+                    singleLine = true,
+                    isError = error,
+                    supportingText = if (error) {
+                        { Text("비밀번호가 일치하지 않습니다", color = MaterialTheme.colorScheme.error) }
+                    } else null,
+                    visualTransformation = if (showPassword)
+                        androidx.compose.ui.text.input.VisualTransformation.None
+                    else
+                        androidx.compose.ui.text.input.PasswordVisualTransformation(),
+                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                        keyboardType = androidx.compose.ui.text.input.KeyboardType.Password
+                    ),
+                    trailingIcon = {
+                        TextButton(onClick = { showPassword = !showPassword }) {
+                            Text(if (showPassword) "숨김" else "표시")
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = {
+                    if (AnimationStore.verifyPassword(animation, input.trim())) onUnlock()
+                    else error = true
+                },
+                enabled = input.isNotBlank()
+            ) { Text("확인") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("취소") }
+        }
+    )
 }
 
 @Composable
@@ -595,7 +850,12 @@ private fun MarketSection(
     items: List<AnimationStore.RemoteAnimation>?,
     likedIds: Set<String>,
     onCardClick: (AnimationStore.RemoteAnimation) -> Unit,
-    onToggleLike: (AnimationStore.RemoteAnimation) -> Unit
+    onToggleLike: (AnimationStore.RemoteAnimation) -> Unit,
+    onReport: (AnimationStore.RemoteAnimation) -> Unit = {},
+    onBlock: (AnimationStore.RemoteAnimation) -> Unit = {},
+    onAdminDelete: (AnimationStore.RemoteAnimation) -> Unit = {},
+    isLocked: (AnimationStore.RemoteAnimation) -> Boolean = { false },
+    emptyText: String = "아직 공유된 애니메이션이 없습니다"
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text(
@@ -609,7 +869,7 @@ private fun MarketSection(
                 contentAlignment = Alignment.Center
             ) { CircularProgressIndicator(modifier = Modifier.size(24.dp)) }
             items.isEmpty() -> Text(
-                "아직 공유된 애니메이션이 없습니다",
+                emptyText,
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(horizontal = 24.dp)
@@ -623,7 +883,11 @@ private fun MarketSection(
                         animation = animation,
                         isLiked = animation.id in likedIds,
                         onClick = { onCardClick(animation) },
-                        onToggleLike = { onToggleLike(animation) }
+                        onToggleLike = { onToggleLike(animation) },
+                        onReport = { onReport(animation) },
+                        onBlock = { onBlock(animation) },
+                        onAdminDelete = { onAdminDelete(animation) },
+                        locked = isLocked(animation)
                     )
                 }
             }
@@ -637,13 +901,20 @@ fun AnimationCard(
     animation: AnimationStore.RemoteAnimation,
     isLiked: Boolean,
     onClick: () -> Unit,
-    onToggleLike: () -> Unit
+    onToggleLike: () -> Unit,
+    onReport: () -> Unit = {},
+    onBlock: () -> Unit = {},
+    onAdminDelete: () -> Unit = {},
+    locked: Boolean = false
 ) {
     val context = LocalContext.current
+    var menuExpanded by remember { mutableStateOf(false) }
+    val isMine = AuthManager.currentUser?.uid == animation.creatorUid
+    Box {
     Surface(
         modifier = Modifier
             .width(110.dp)
-            .clickable(onClick = onClick),
+            .combinedClickable(onClick = onClick, onLongClick = { menuExpanded = true }),
         shape = RoundedCornerShape(12.dp),
         color = MaterialTheme.colorScheme.surface,
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
@@ -656,32 +927,73 @@ fun AnimationCard(
                     .clip(RoundedCornerShape(topStart = 12.dp, topEnd = 12.dp))
                     .background(MaterialTheme.colorScheme.surfaceVariant)
             ) {
-                // 실제 미리보기 — ruleJson을 파싱해 마블/드리프트 물리 시뮬 + Coil로 원격 이미지 로드
-                MarketMarblePreview(animation = animation)
-                // 좌상단: 클릭 즉시 재생 (다운로드 → 임시 Rule로 OverlayService 시작)
-                IconButton(
-                    onClick = {
-                        val appCtx = context.applicationContext
-                        AppCoroutineScope.scope.launch {
-                            Toast.makeText(appCtx, "준비 중…", Toast.LENGTH_SHORT).show()
-                            val r = AnimationStore.download(appCtx, animation, countAsDownload = false)
-                            val downloadedRule = r.getOrNull()
-                            if (downloadedRule == null) {
-                                Toast.makeText(appCtx, "재생 실패: ${r.exceptionOrNull()?.message ?: "?"}", Toast.LENGTH_LONG).show()
-                            } else {
-                                val intent = Intent(appCtx, OverlayService::class.java)
-                                intent.putExtra("ruleJson", downloadedRule.toJson().toString())
-                                appCtx.startService(intent)
+                if (locked) {
+                    // #39b 비밀번호 잠금 — 내용 숨김
+                    Column(
+                        modifier = Modifier.fillMaxSize(),
+                        verticalArrangement = Arrangement.Center,
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Icon(
+                            Icons.Filled.Lock,
+                            contentDescription = "잠김",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(32.dp)
+                        )
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            "비밀번호 필요",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                } else {
+                    // 실제 미리보기 — ruleJson을 파싱해 마블/드리프트 물리 시뮬 + Coil로 원격 이미지 로드
+                    MarketMarblePreview(animation = animation)
+                }
+                // 비공개 표시 (#39)
+                if (animation.isPrivate) {
+                    Surface(
+                        modifier = Modifier
+                            .align(Alignment.BottomEnd)
+                            .padding(4.dp),
+                        shape = RoundedCornerShape(8.dp),
+                        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.85f)
+                    ) {
+                        Icon(
+                            Icons.Filled.Lock,
+                            contentDescription = "비공개",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(3.dp).size(14.dp)
+                        )
+                    }
+                }
+                // 좌상단: 클릭 즉시 재생 (다운로드 → 임시 Rule로 OverlayService 시작) — 잠긴 항목은 숨김
+                if (!locked) {
+                    IconButton(
+                        onClick = {
+                            val appCtx = context.applicationContext
+                            AppCoroutineScope.scope.launch {
+                                Toast.makeText(appCtx, "준비 중…", Toast.LENGTH_SHORT).show()
+                                val r = AnimationStore.download(appCtx, animation, countAsDownload = false)
+                                val downloadedRule = r.getOrNull()
+                                if (downloadedRule == null) {
+                                    Toast.makeText(appCtx, "재생 실패: ${r.exceptionOrNull()?.message ?: "?"}", Toast.LENGTH_LONG).show()
+                                } else {
+                                    val intent = Intent(appCtx, OverlayService::class.java)
+                                    intent.putExtra("ruleJson", downloadedRule.toJson().toString())
+                                    appCtx.startService(intent)
+                                }
                             }
-                        }
-                    },
-                    modifier = Modifier.align(Alignment.TopStart).size(24.dp)
-                ) {
-                    Icon(
-                        Icons.Filled.PlayArrow,
-                        contentDescription = "재생",
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+                        },
+                        modifier = Modifier.align(Alignment.TopStart).size(24.dp)
+                    ) {
+                        Icon(
+                            painterResource(R.drawable.ic_play_rounded),
+                            contentDescription = "재생",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
                 }
                 // 우상단 다운로드 수 배지
                 Surface(
@@ -729,6 +1041,26 @@ fun AnimationCard(
             )
         }
     }
+        // 롱프레스 컨텍스트 메뉴 (#44 신고 / #46 차단 / #40 관리자 삭제)
+        DropdownMenu(expanded = menuExpanded, onDismissRequest = { menuExpanded = false }) {
+            if (!isMine) {
+                DropdownMenuItem(
+                    text = { Text("신고") },
+                    onClick = { menuExpanded = false; onReport() }
+                )
+                DropdownMenuItem(
+                    text = { Text("이 사용자 차단") },
+                    onClick = { menuExpanded = false; onBlock() }
+                )
+            }
+            if (Admin.isAdmin) {
+                DropdownMenuItem(
+                    text = { Text("관리자 삭제", color = MaterialTheme.colorScheme.error) },
+                    onClick = { menuExpanded = false; onAdminDelete() }
+                )
+            }
+        }
+    }
 }
 
 @Composable
@@ -761,7 +1093,10 @@ private fun LikeButton(liked: Boolean, count: Long, onClick: () -> Unit) {
 fun AnimationDetailScreen(
     animation: AnimationStore.RemoteAnimation,
     onBack: () -> Unit,
-    onImported: () -> Unit
+    onImported: () -> Unit,
+    onReport: (AnimationStore.RemoteAnimation) -> Unit = {},
+    onBlock: (AnimationStore.RemoteAnimation) -> Unit = {},
+    onAdminDelete: (AnimationStore.RemoteAnimation) -> Unit = {}
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -769,6 +1104,9 @@ fun AnimationDetailScreen(
     var progress by remember { mutableStateOf(0f) }
     var resultMsg by remember { mutableStateOf<String?>(null) }
     var resultIsError by remember { mutableStateOf(false) }
+    var menuExpanded by remember { mutableStateOf(false) }
+    var showOriginal by remember { mutableStateOf(false) }
+    val isMine = AuthManager.currentUser?.uid == animation.creatorUid
 
     BackHandler { onBack() }
 
@@ -779,13 +1117,44 @@ fun AnimationDetailScreen(
             .padding(24.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
-        Surface(
-            onClick = onBack,
-            shape = RoundedCornerShape(20.dp),
-            color = MaterialTheme.colorScheme.surface,
-            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.fillMaxWidth()
         ) {
-            Text("뒤로", modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp))
+            Surface(
+                onClick = onBack,
+                shape = RoundedCornerShape(20.dp),
+                color = MaterialTheme.colorScheme.surface,
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
+            ) {
+                Text("뒤로", modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp))
+            }
+            Spacer(Modifier.weight(1f))
+            if (!isMine || Admin.isAdmin) {
+                Box {
+                    IconButton(onClick = { menuExpanded = true }) {
+                        Icon(Icons.Filled.MoreVert, contentDescription = "더보기")
+                    }
+                    DropdownMenu(expanded = menuExpanded, onDismissRequest = { menuExpanded = false }) {
+                        if (!isMine) {
+                            DropdownMenuItem(
+                                text = { Text("신고") },
+                                onClick = { menuExpanded = false; onReport(animation) }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("이 사용자 차단") },
+                                onClick = { menuExpanded = false; onBlock(animation); onBack() }
+                            )
+                        }
+                        if (Admin.isAdmin) {
+                            DropdownMenuItem(
+                                text = { Text("관리자 삭제", color = MaterialTheme.colorScheme.error) },
+                                onClick = { menuExpanded = false; onAdminDelete(animation); onBack() }
+                            )
+                        }
+                    }
+                }
+            }
         }
 
         Text(
@@ -798,21 +1167,43 @@ fun AnimationDetailScreen(
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
 
-        // 미디어 큰 미리보기 (9:16 카드) — 상세 화면에서는 시간 제한 없이 풀로 재생
+        // 미리보기 모드 토글: 애니메이션(물리 시뮬, 기본) ↔ 원본 미디어
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            FilterChip(
+                selected = !showOriginal,
+                onClick = { showOriginal = false },
+                label = { Text("애니메이션") }
+            )
+            FilterChip(
+                selected = showOriginal,
+                onClick = { showOriginal = true },
+                label = { Text("원본 미디어") }
+            )
+        }
+
+        // 큰 미리보기 (9:16). 기본은 실제 재생 모습(물리 시뮬), 토글 시 원본 미디어 풀 표시.
         Surface(
             modifier = Modifier.fillMaxWidth().aspectRatio(9f / 16f),
             shape = RoundedCornerShape(16.dp),
             color = MaterialTheme.colorScheme.surfaceVariant
         ) {
-            when (animation.mediaType) {
-                "video" -> FullVideoPreview(url = animation.mediaUrl, modifier = Modifier.fillMaxSize())
-                "lottie" -> RemoteLottiePreview(url = animation.mediaUrl, modifier = Modifier.fillMaxSize())
-                else -> coil.compose.AsyncImage(
-                    model = animation.mediaUrl,
-                    contentDescription = animation.title,
-                    contentScale = androidx.compose.ui.layout.ContentScale.Fit,
-                    modifier = Modifier.fillMaxSize()
-                )
+            if (!showOriginal) {
+                // 카드와 동일한 물리 시뮬레이션을 크게 — "어떻게 재생되는지" 그대로 보여줌
+                MarketMarblePreview(animation = animation)
+            } else {
+                when (animation.mediaType) {
+                    "video" -> FullVideoPreview(url = animation.mediaUrl, modifier = Modifier.fillMaxSize())
+                    "lottie" -> RemoteLottiePreview(url = animation.mediaUrl, modifier = Modifier.fillMaxSize())
+                    else -> coil.compose.AsyncImage(
+                        model = animation.mediaUrl,
+                        contentDescription = animation.title,
+                        contentScale = androidx.compose.ui.layout.ContentScale.Fit,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                }
             }
         }
 
@@ -859,9 +1250,225 @@ fun AnimationDetailScreen(
     }
 }
 
+/**
+ * #46 — 차단한 사용자 관리 화면. 목록 + 차단 해제.
+ */
+@Composable
+fun BlockedUsersScreen(modifier: Modifier = Modifier, onBack: () -> Unit) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var items by remember { mutableStateOf<List<ModerationStore.BlockedUser>?>(null) }
+    var refreshTick by remember { mutableStateOf(0) }
+
+    BackHandler { onBack() }
+    LaunchedEffect(refreshTick) {
+        items = ModerationStore.listBlockedUsers().getOrNull() ?: emptyList()
+    }
+
+    Column(
+        modifier = modifier
+            .fillMaxSize()
+            .padding(24.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Surface(
+                onClick = onBack,
+                shape = RoundedCornerShape(20.dp),
+                color = MaterialTheme.colorScheme.surface,
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
+            ) {
+                Text("뒤로", modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp))
+            }
+            Spacer(Modifier.width(12.dp))
+            Text("차단한 사용자", style = MaterialTheme.typography.headlineSmall)
+        }
+
+        when {
+            items == null -> Box(
+                modifier = Modifier.fillMaxWidth().padding(vertical = 24.dp),
+                contentAlignment = Alignment.Center
+            ) { CircularProgressIndicator(modifier = Modifier.size(24.dp)) }
+            items!!.isEmpty() -> Text(
+                "차단한 사용자가 없습니다.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            else -> LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                items(items!!, key = { it.uid }) { blocked ->
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = MaterialTheme.colorScheme.surface,
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(blocked.name, style = MaterialTheme.typography.bodyLarge)
+                                Text(
+                                    blocked.uid,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1
+                                )
+                            }
+                            TextButton(onClick = {
+                                scope.launch {
+                                    val r = ModerationStore.unblockUser(blocked.uid)
+                                    if (r.isSuccess) {
+                                        Toast.makeText(context, "차단 해제됨", Toast.LENGTH_SHORT).show()
+                                        refreshTick++
+                                    } else {
+                                        Toast.makeText(context, "실패: ${r.exceptionOrNull()?.message ?: "?"}", Toast.LENGTH_SHORT).show()
+                                    }
+                                }
+                            }) { Text("차단 해제") }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * #40 — 관리자 신고 검토 화면. 신고 목록 + 콘텐츠 삭제 / 신고 무시.
+ */
+@Composable
+fun AdminReportsScreen(modifier: Modifier = Modifier, onBack: () -> Unit) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var items by remember { mutableStateOf<List<ModerationStore.Report>?>(null) }
+    var refreshTick by remember { mutableStateOf(0) }
+    var busy by remember { mutableStateOf(false) }
+
+    BackHandler { onBack() }
+    LaunchedEffect(refreshTick) {
+        items = ModerationStore.listReports().getOrNull() ?: emptyList()
+    }
+
+    Column(
+        modifier = modifier
+            .fillMaxSize()
+            .padding(24.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Surface(
+                onClick = onBack,
+                shape = RoundedCornerShape(20.dp),
+                color = MaterialTheme.colorScheme.surface,
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
+            ) {
+                Text("뒤로", modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp))
+            }
+            Spacer(Modifier.width(12.dp))
+            Text("신고 검토", style = MaterialTheme.typography.headlineSmall)
+        }
+
+        when {
+            items == null -> Box(
+                modifier = Modifier.fillMaxWidth().padding(vertical = 24.dp),
+                contentAlignment = Alignment.Center
+            ) { CircularProgressIndicator(modifier = Modifier.size(24.dp)) }
+            items!!.isEmpty() -> Text(
+                "접수된 신고가 없습니다.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            else -> LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                items(items!!, key = { it.id }) { report ->
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = MaterialTheme.colorScheme.surface,
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(14.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Text(
+                                report.animationTitle.ifBlank { "(이름 없음)" },
+                                style = MaterialTheme.typography.titleSmall
+                            )
+                            Text(
+                                "사유: ${report.category}",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.error
+                            )
+                            if (report.note.isNotBlank()) {
+                                Text(
+                                    "상세: ${report.note}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Text(
+                                "제작자: ${report.creatorName} (${report.creatorUid.take(8)}…)",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Row(
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                modifier = Modifier.padding(top = 4.dp)
+                            ) {
+                                TextButton(
+                                    enabled = !busy,
+                                    onClick = {
+                                        busy = true
+                                        scope.launch {
+                                            val r = AnimationStore.adminDeleteById(report.animationId)
+                                            if (r.isSuccess) {
+                                                ModerationStore.dismissReportsForAnimation(report.animationId)
+                                                Toast.makeText(context, "콘텐츠 삭제 완료", Toast.LENGTH_SHORT).show()
+                                                refreshTick++
+                                            } else {
+                                                Toast.makeText(context, "삭제 실패: ${r.exceptionOrNull()?.message ?: "?"}", Toast.LENGTH_SHORT).show()
+                                            }
+                                            busy = false
+                                        }
+                                    }
+                                ) { Text("콘텐츠 삭제", color = MaterialTheme.colorScheme.error) }
+                                TextButton(
+                                    enabled = !busy,
+                                    onClick = {
+                                        busy = true
+                                        scope.launch {
+                                            val r = ModerationStore.dismissReport(report.id)
+                                            if (r.isSuccess) {
+                                                Toast.makeText(context, "신고 처리됨", Toast.LENGTH_SHORT).show()
+                                                refreshTick++
+                                            } else {
+                                                Toast.makeText(context, "실패: ${r.exceptionOrNull()?.message ?: "?"}", Toast.LENGTH_SHORT).show()
+                                            }
+                                            busy = false
+                                        }
+                                    }
+                                ) { Text("신고 무시") }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 @Composable
 fun SettingsTab(modifier: Modifier = Modifier) {
     val context = LocalContext.current
+    // 서브 화면 네비게이션: null=설정 본문, "blocked"=차단 관리, "reports"=신고 검토
+    var subScreen by remember { mutableStateOf<String?>(null) }
+
+    when (subScreen) {
+        "blocked" -> { BlockedUsersScreen(modifier = modifier, onBack = { subScreen = null }); return }
+        "reports" -> { AdminReportsScreen(modifier = modifier, onBack = { subScreen = null }); return }
+    }
+
     Column(
         modifier = modifier
             .fillMaxSize()
@@ -876,7 +1483,10 @@ fun SettingsTab(modifier: Modifier = Modifier) {
         HorizontalDivider()
 
         Text("계정", style = MaterialTheme.typography.titleMedium)
-        AccountSection()
+        AccountSection(
+            onOpenBlocked = { subScreen = "blocked" },
+            onOpenReports = { subScreen = "reports" }
+        )
 
         // 로그인 시에만 노출되는 섹션들
         if (AuthManager.currentUser != null) {
@@ -1401,7 +2011,10 @@ private fun MyShareItemRow(
 
 
 @Composable
-private fun AccountSection() {
+private fun AccountSection(
+    onOpenBlocked: () -> Unit = {},
+    onOpenReports: () -> Unit = {}
+) {
     val context = LocalContext.current
     val activity = context as? Activity
     val webClientId = stringResource(R.string.default_web_client_id)
@@ -1455,6 +2068,44 @@ private fun AccountSection() {
                     )
                 }
                 TextButton(onClick = { AuthManager.signOut() }) { Text("로그아웃") }
+            }
+        }
+
+        // 차단한 사용자 관리 (#46)
+        Surface(
+            onClick = onOpenBlocked,
+            shape = RoundedCornerShape(12.dp),
+            color = MaterialTheme.colorScheme.surface,
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp)
+            ) {
+                Text("차단한 사용자 관리", modifier = Modifier.weight(1f))
+                Text("›", style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+
+        // 관리자 — 신고 검토 (#40)
+        if (Admin.isAdmin) {
+            Surface(
+                onClick = onOpenReports,
+                shape = RoundedCornerShape(12.dp),
+                color = MaterialTheme.colorScheme.surface,
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp)
+                ) {
+                    Text("🛡 신고 검토 (관리자)", modifier = Modifier.weight(1f))
+                    Text("›", style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
             }
         }
     } else {
@@ -1559,7 +2210,8 @@ fun RuleListScreen(
     onEdit: (String) -> Unit,
     onDelete: (String) -> Unit,
     onToggleEnabled: (String, Boolean) -> Unit,
-    onRenameGroup: (String, String) -> Unit
+    onRenameGroup: (String, String) -> Unit,
+    onChanged: () -> Unit = {}
 ) {
     // groupBy는 LinkedHashMap을 반환 → rules 추가 순서대로 그룹 유지. "기본"만 강제로 맨 앞.
     val rawGrouped = rules.groupBy { it.groupName.ifBlank { "기본" } }
@@ -1642,7 +2294,8 @@ fun RuleListScreen(
                                         rule = rule,
                                         onClick = { onEdit(rule.id) },
                                         onDelete = { onDelete(rule.id) },
-                                        onToggleEnabled = { onToggleEnabled(rule.id, it) }
+                                        onToggleEnabled = { onToggleEnabled(rule.id, it) },
+                                        onChanged = onChanged
                                     )
                                 }
                             }
@@ -1858,7 +2511,8 @@ fun RuleCard(
     rule: Rule,
     onClick: () -> Unit,
     onDelete: () -> Unit,
-    onToggleEnabled: (Boolean) -> Unit
+    onToggleEnabled: (Boolean) -> Unit,
+    onChanged: () -> Unit = {}
 ) {
     var menuExpanded by remember { mutableStateOf(false) }
     var showShareDialog by remember { mutableStateOf(false) }
@@ -1899,7 +2553,7 @@ fun RuleCard(
                         .size(24.dp)
                 ) {
                     Icon(
-                        Icons.Filled.PlayArrow,
+                        painterResource(R.drawable.ic_play_rounded),
                         contentDescription = "재생",
                         tint = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -1943,25 +2597,31 @@ fun RuleCard(
                                     )
                                 }
                             }
-                            // 복사 — 이 규칙을 클립보드에 담음
-                            TextChipButton("복", "복사") {
-                                menuExpanded = false
+                            // 복사 — 이 규칙을 클립보드에 담음. 체크 애니메이션이 보이도록 메뉴는 닫지 않음.
+                            CopyLottieButton("복사") {
                                 RuleClipboard.copied = rule
                                 Toast.makeText(context, "규칙 복사됨 — 다른 카드에서 붙여넣기 가능", Toast.LENGTH_SHORT).show()
                             }
-                            // 붙여넣기 — 클립보드에 뭔가 있을 때만 표시
+                            // 붙여넣기 — 클립보드에 뭔가 있을 때만 표시. 이 카드 위로 덮어쓰기(새 카드 X).
                             if (RuleClipboard.copied != null) {
-                                TextChipButton("붙", "붙여넣기") {
+                                PasteLottieButton("붙여넣기") {
                                     menuExpanded = false
-                                    val source = RuleClipboard.copied ?: return@TextChipButton
-                                    val newRule = source.copy(
-                                        id = java.util.UUID.randomUUID().toString(),
-                                        name = "${source.name.ifBlank { "규칙" }} 복사",
+                                    val source = RuleClipboard.copied ?: return@PasteLottieButton
+                                    // 이름: 원본 이름에서 기존 _숫자 접미사를 떼고 A_1, A_2, A_3… 오름차순으로
+                                    val base = source.name.replace(Regex("_\\d+$"), "").ifBlank { "규칙" }
+                                    val existing = RuleStore.loadAll(context).map { it.name }.toSet()
+                                    var n = 1
+                                    while ("${base}_$n" in existing) n++
+                                    // 현재 카드(rule.id) 위로 원본 내용을 덮어쓴다
+                                    val pasted = source.copy(
+                                        id = rule.id,
+                                        name = "${base}_$n",
                                         // 코인 룰이면 lastPolledPrice는 새로 시작 (안 그러면 첫 트리거 누락 가능성)
                                         lastPolledPrice = null
                                     )
-                                    RuleStore.upsert(context, newRule)
-                                    Toast.makeText(context, "붙여넣기 완료 — 새 규칙 추가됨", Toast.LENGTH_SHORT).show()
+                                    RuleStore.upsert(context, pasted)
+                                    onChanged()
+                                    Toast.makeText(context, "붙여넣기 완료 — ${base}_$n", Toast.LENGTH_SHORT).show()
                                 }
                             }
                             // 삭제 — 항상 표시, 흰색 트래시 → 테마 onSurface로 틴트
@@ -2036,7 +2696,7 @@ fun RuleCard(
         ShareDialog(
             rule = rule,
             onDismiss = { showShareDialog = false },
-            onConfirm = { title, includeApp ->
+            onConfirm = { title, includeApp, isPrivate, password ->
                 showShareDialog = false
                 val appCtx = context.applicationContext
                 AppCoroutineScope.scope.launch {
@@ -2044,7 +2704,9 @@ fun RuleCard(
                     val r = AnimationStore.upload(
                         appCtx, rule,
                         customTitle = title,
-                        includeApp = includeApp
+                        includeApp = includeApp,
+                        isPrivate = isPrivate,
+                        password = password
                     )
                     val msg = if (r.isSuccess) "공유 완료" else "공유 실패: ${r.exceptionOrNull()?.message ?: "알 수 없음"}"
                     Toast.makeText(appCtx, msg, Toast.LENGTH_LONG).show()
@@ -2058,10 +2720,13 @@ fun RuleCard(
 fun ShareDialog(
     rule: Rule,
     onDismiss: () -> Unit,
-    onConfirm: (title: String, includeApp: Boolean) -> Unit
+    onConfirm: (title: String, includeApp: Boolean, isPrivate: Boolean, password: String?) -> Unit
 ) {
     var title by remember { mutableStateOf("") }
     var includeApp by remember { mutableStateOf(false) }
+    var isPrivate by remember { mutableStateOf(false) }
+    var password by remember { mutableStateOf("") }
+    var showPassword by remember { mutableStateOf(false) }
     val defaultTitle = rule.name.ifBlank { rule.appLabel ?: "이름 없음" }
 
     Dialog(onDismissRequest = onDismiss) {
@@ -2118,14 +2783,136 @@ fun ShareDialog(
                 }
 
                 Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("비공개 공유")
+                        Text(
+                            "마켓 목록에 노출되지 않고, 제목을 정확히 검색해야만 찾을 수 있습니다",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Switch(checked = isPrivate, onCheckedChange = { isPrivate = it })
+                }
+
+                // 비공개일 때만 비밀번호 옵션 노출
+                if (isPrivate) {
+                    OutlinedTextField(
+                        value = password,
+                        onValueChange = { password = it },
+                        label = { Text("비밀번호 (선택)") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                        visualTransformation = if (showPassword)
+                            androidx.compose.ui.text.input.VisualTransformation.None
+                        else androidx.compose.ui.text.input.PasswordVisualTransformation(),
+                        keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                            keyboardType = androidx.compose.ui.text.input.KeyboardType.Password
+                        ),
+                        trailingIcon = {
+                            TextButton(onClick = { showPassword = !showPassword }) {
+                                Text(if (showPassword) "숨김" else "표시",
+                                    style = MaterialTheme.typography.labelSmall)
+                            }
+                        },
+                        supportingText = {
+                            Text(
+                                "설정 시 받는 사람이 비밀번호를 입력해야 미리보기/다운로드할 수 있습니다",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    )
+                }
+
+                Row(
                     horizontalArrangement = Arrangement.End,
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     TextButton(onClick = onDismiss) { Text("취소") }
                     TextButton(
-                        onClick = { onConfirm(title.trim(), includeApp) },
+                        onClick = {
+                            val pw = password.trim().takeIf { isPrivate && it.isNotBlank() }
+                            onConfirm(title.trim(), includeApp, isPrivate, pw)
+                        },
                         enabled = title.isNotBlank()
                     ) { Text("공유") }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * #44 신고 다이얼로그 — 카테고리 선택(필수) + 상세 설명(선택).
+ */
+@Composable
+fun ReportDialog(
+    animation: AnimationStore.RemoteAnimation,
+    onDismiss: () -> Unit,
+    onSubmit: (category: String, note: String) -> Unit
+) {
+    var selectedCategory by remember { mutableStateOf<String?>(null) }
+    var note by remember { mutableStateOf("") }
+
+    Dialog(onDismissRequest = onDismiss) {
+        Surface(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(16.dp),
+            color = MaterialTheme.colorScheme.surface
+        ) {
+            Column(
+                modifier = Modifier
+                    .padding(20.dp)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Text("신고", style = MaterialTheme.typography.titleMedium)
+                Text(
+                    "'${animation.title.ifBlank { "(이름 없음)" }}' 콘텐츠를 신고합니다. 사유를 선택해주세요.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+
+                ModerationStore.REPORT_CATEGORIES.forEach { category ->
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(8.dp))
+                            .clickable { selectedCategory = category }
+                            .padding(vertical = 2.dp)
+                    ) {
+                        RadioButton(
+                            selected = selectedCategory == category,
+                            onClick = { selectedCategory = category }
+                        )
+                        Spacer(Modifier.width(4.dp))
+                        Text(category, style = MaterialTheme.typography.bodyMedium)
+                    }
+                }
+
+                OutlinedTextField(
+                    value = note,
+                    onValueChange = { note = it },
+                    label = { Text("상세 설명 (선택)") },
+                    modifier = Modifier.fillMaxWidth(),
+                    minLines = 2,
+                    maxLines = 4
+                )
+
+                Row(
+                    horizontalArrangement = Arrangement.End,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    TextButton(onClick = onDismiss) { Text("취소") }
+                    TextButton(
+                        onClick = { selectedCategory?.let { onSubmit(it, note.trim()) } },
+                        enabled = selectedCategory != null
+                    ) { Text("신고하기", color = MaterialTheme.colorScheme.error) }
                 }
             }
         }
@@ -2441,6 +3228,90 @@ fun LottieIconButton(
         )
     }
 }
+
+/**
+ * 복제(복사/붙여넣기) Lottie 버튼. raw/paste.json = 카드 두 장이 겹쳤다 떨어지는 "복제" 모션.
+ *  - 선(STROKE_COLOR) → onSurface : 테마 라인색 (다크/라이트 자동 대응)
+ *  - 면(COLOR) → surfaceVariant : 카드 미리보기 박스 배경색과 동일.
+ *      └ 배경 위에선 같은 색이라 "투명"하게 보이고, 두 카드가 겹치는 구간에선
+ *        전면 카드의 면이 후면 카드의 선을 가린다(종이 두 장 포갠 효과). 흰 박스 X.
+ *  - mirror = true 면 좌우 대칭(복사 ↔ 붙여넣기 시각 구분)
+ */
+@Composable
+fun DuplicateLottieButton(
+    contentDescription: String,
+    mirror: Boolean = false,
+    size: Dp = 24.dp,
+    onClick: () -> Unit
+) {
+    val context = LocalContext.current
+    val resId = remember { context.resources.getIdentifier("paste", "raw", context.packageName) }
+    if (resId == 0) {
+        // 폴백: 리소스 없으면 기존 텍스트 칩
+        TextChipButton(if (mirror) "복" else "붙", contentDescription, onClick)
+        return
+    }
+
+    val composition by com.airbnb.lottie.compose.rememberLottieComposition(
+        com.airbnb.lottie.compose.LottieCompositionSpec.RawRes(resId)
+    )
+    val animatable = com.airbnb.lottie.compose.rememberLottieAnimatable()
+    val scope = rememberCoroutineScope()
+    val strokeArgb = MaterialTheme.colorScheme.onSurface.toArgb()
+    // 면은 박스 배경(surfaceVariant)과 같은 색으로 채워 "투명"하게 보이게 하되,
+    // 겹치는 구간에선 전면이 후면 선을 덮어 가림 효과를 낸다.
+    val fillArgb = MaterialTheme.colorScheme.surfaceVariant.toArgb()
+
+    val dynamicProperties = com.airbnb.lottie.compose.rememberLottieDynamicProperties(
+        com.airbnb.lottie.compose.rememberLottieDynamicProperty(
+            property = com.airbnb.lottie.LottieProperty.STROKE_COLOR,
+            value = strokeArgb,
+            keyPath = arrayOf("**")
+        ),
+        com.airbnb.lottie.compose.rememberLottieDynamicProperty(
+            property = com.airbnb.lottie.LottieProperty.COLOR,
+            value = fillArgb,
+            keyPath = arrayOf("**")
+        )
+    )
+
+    // 메뉴 펼쳐질 때 1회 자동 재생
+    LaunchedEffect(composition) {
+        composition?.let { animatable.animate(it, iterations = 1, speed = 1.2f) }
+    }
+
+    Box(
+        modifier = Modifier
+            .size(size)
+            .clip(CircleShape)
+            .clickable {
+                scope.launch {
+                    composition?.let { animatable.animate(it, iterations = 1, speed = 1.2f) }
+                }
+                onClick()
+            },
+        contentAlignment = Alignment.Center
+    ) {
+        com.airbnb.lottie.compose.LottieAnimation(
+            composition = composition,
+            progress = { animatable.progress },
+            dynamicProperties = dynamicProperties,
+            modifier = Modifier
+                .size(size)
+                .then(if (mirror) Modifier.scale(scaleX = -1f, scaleY = 1f) else Modifier)
+        )
+    }
+}
+
+/** 붙여넣기 = 복제 아이콘 (그대로). */
+@Composable
+fun PasteLottieButton(contentDescription: String, size: Dp = 24.dp, onClick: () -> Unit) =
+    DuplicateLottieButton(contentDescription, mirror = false, size = size, onClick = onClick)
+
+/** 복사 = 붙여넣기 아이콘의 좌우 대칭. */
+@Composable
+fun CopyLottieButton(contentDescription: String, size: Dp = 24.dp, onClick: () -> Unit) =
+    DuplicateLottieButton(contentDescription, mirror = true, size = size, onClick = onClick)
 
 @Composable
 fun MediaContent(rule: Rule, sizeDp: Dp, modifier: Modifier = Modifier) {
@@ -3016,10 +3887,10 @@ private suspend fun runDriftSim(
     val maxX = (boxWidth - sizePx).coerceAtLeast(0f)
     val maxY = (boxHeight - sizePx).coerceAtLeast(0f)
 
-    // 시작: 사용자 X 위치 기준 (랜덤 옵션 ON이면 무작위), Y는 화면 아래
+    // 시작: 사용자 위치 기준 (랜덤 옵션 ON이면 X 무작위). #41 — Y도 화면 아래가 아닌 설정 위치에서 상승
     var x = if (rule.driftRandomStartX) (Math.random() * maxX).toFloat()
             else (rule.targetXFraction * maxX).coerceIn(0f, maxX)
-    var y = boxHeight  // 화면 밖 아래에서 진입
+    var y = (rule.targetYFraction * maxY).coerceIn(0f, maxY)  // 지정 위치에서 시작
 
     // 진행 방향: 기본은 위쪽 (-90°) ± 30° 랜덤. 충돌 시 ux/uy의 부호만 뒤집어 재사용.
     val angle = (-PI / 2 + (Math.random() - 0.5) * (PI / 3)).toFloat()
@@ -3980,7 +4851,7 @@ fun RuleEditScreen(
                 SliderRow(
                     label = "상승 속도",
                     value = rule.driftSpeed,
-                    range = 50f..400f,
+                    range = 50f..1000f,
                     onValueChange = { rule = rule.copy(driftSpeed = it) },
                     suffix = "dp/s"
                 )
@@ -3992,7 +4863,7 @@ fun RuleEditScreen(
                     Column(modifier = Modifier.weight(1f)) {
                         Text("시작 위치 랜덤")
                         Text(
-                            "매번 화면 가로축에서 랜덤 X 위치에서 출발 (지정 위치 무시)",
+                            "매번 가로축 랜덤 위치에서 출발 (지정 X 무시, 높이는 지정 위치 유지)",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -4096,7 +4967,7 @@ fun RuleEditScreen(
                 SliderRow(
                     label = "이동 속도",
                     value = rule.driftSpeed,
-                    range = 50f..400f,
+                    range = 50f..1000f,
                     onValueChange = { rule = rule.copy(driftSpeed = it) },
                     suffix = "dp/s"
                 )

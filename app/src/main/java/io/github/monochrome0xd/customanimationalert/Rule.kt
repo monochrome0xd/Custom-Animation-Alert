@@ -48,7 +48,7 @@ data class Rule(
     val entryAnimation: Boolean = true,
     val entryMode: String = "marble",  // "marble" | "drift"
     // 천천히 이동(drift) 모드 전용 — entryMode == "drift"일 때만 사용
-    val driftSpeed: Float = 400f,  // dp/s (50~400, OverlayService coerceIn 한도와 동일)
+    val driftSpeed: Float = 400f,  // dp/s (50~1000, OverlayService coerceIn 한도와 동일)
     val driftBounceWalls: Boolean = true,
     val driftBounceFloor: Boolean = true,
     val driftBounceCeiling: Boolean = false,
@@ -256,7 +256,7 @@ data class Rule(
             playInSilent = obj.optBoolean("playInSilent", false),
             entryAnimation = obj.optBoolean("entryAnimation", true),
             entryMode = obj.optString("entryMode", "marble"),
-            driftSpeed = obj.optDouble("driftSpeed", 400.0).toFloat().coerceIn(50f, 400f),
+            driftSpeed = obj.optDouble("driftSpeed", 400.0).toFloat().coerceIn(50f, 1000f),
             driftBounceWalls = obj.optBoolean("driftBounceWalls", true),
             driftBounceFloor = obj.optBoolean("driftBounceFloor", true),
             driftBounceCeiling = obj.optBoolean("driftBounceCeiling", false),
@@ -383,7 +383,7 @@ object RuleStore {
             playInSilent = v1.getBoolean("playInSilent", false),
             entryAnimation = v1.getBoolean("entryAnimation", true),
             entryMode = v1.getString("entryMode", "marble") ?: "marble",
-            driftSpeed = v1.getFloat("driftSpeed", 400f).coerceIn(50f, 400f),
+            driftSpeed = v1.getFloat("driftSpeed", 400f).coerceIn(50f, 1000f),
             driftBounceWalls = v1.getBoolean("driftBounceWalls", true),
             driftBounceFloor = v1.getBoolean("driftBounceFloor", true),
             driftBounceCeiling = v1.getBoolean("driftBounceCeiling", false),
